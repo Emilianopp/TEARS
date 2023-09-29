@@ -1,0 +1,15 @@
+transformers
+pandas
+openpyxl
+sentencepiece
+torch
+accelerate
+safetensors==0.3.1
+einops
+openai
+tqdm
+tenacity
+scipy
+
+# huggingface transformers installed from github
+git+https://github.com/huggingface/transformers

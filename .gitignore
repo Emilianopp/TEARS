@@ -1,0 +1,6 @@
+*.out
+*.sh
+*.csv
+data/
+data_preprocessed/
+cc/
