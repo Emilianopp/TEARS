@@ -99,12 +99,12 @@ def create_train_matrix_and_actual_lists(train_data, valid_data, test_data, movi
 
 def main():
     # Load datasets
-    train_data = load_dataset("../data_preprocessed/ml-100k/data_split/train_set_leave_one.json")
-    valid_data = load_dataset("../data_preprocessed/ml-100k/data_split/valid_set_leave_one.json")
-    test_data = load_dataset("../data_preprocessed/ml-100k/data_split/test_set_leave_one.json")
+    train_data = load_dataset("./data_preprocessed/ml-100k/data_split/train_set_leave_one.json")
+    valid_data = load_dataset("./data_preprocessed/ml-100k/data_split/valid_set_leave_one.json")
+    test_data = load_dataset("./data_preprocessed/ml-100k/data_split/test_set_leave_one.json")
 
     # Create movie title to ID mapping
-    movie_title_to_id = map_title_to_id("../data/ml-100k/movies.dat")
+    movie_title_to_id = map_title_to_id("./data/ml-100k/movies.dat")
 
     # Convert titles to IDs in each dataset
     train_data = convert_titles_to_ids(train_data, movie_title_to_id)
@@ -130,7 +130,7 @@ def main():
     print("train_matrix:", np.array(train_matrix).shape)
 
     # Save consolidated data
-    with open("../data_preprocessed/ml-100k/full_data.json", 'w') as f:
+    with open("./data_preprocessed/ml-100k/full_data.json", 'w') as f:
         json.dump(full_data, f, indent=4)
 
 

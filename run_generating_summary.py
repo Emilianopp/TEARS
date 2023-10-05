@@ -6,6 +6,7 @@ import json
 from torch.utils.data import Dataset, DataLoader
 from data.dataloader import get_dataloader
 from argparse import ArgumentParser
+import os
 
 
 def parse_args():  # Parse command line arguments
@@ -13,9 +14,9 @@ def parse_args():  # Parse command line arguments
     parser.add_argument("--data_name", default='ml-100k', type=str)
     parser.add_argument(
         "--model_name", default='gpt3.5', type=str,
-        help="model_type: ['gpt2', 'llama-3b', 'llama-7b', 'falcon', 'llama2', 'gpt3.5', 'gpt4']"
+        help="model_type: ['gpt2', 'llama','llama-3b', 'llama-7b', 'falcon', 'llama2', 'gpt3.5', 'gpt4']"
     )
-    parser.add_argument("--batch_size", default=8, type=int)
+    parser.add_argument("--batch_size", default=4, type=int)
     parser.add_argument("--num_users", default=3, type=int)
     parser.add_argument("--mode", default='sum', type=str, choices=['sum', 'rec', 'ret', 'rerank'])
     # setting for summary generation
@@ -29,20 +30,24 @@ if __name__ == "__main__":
     print("Start time:", time.asctime())
     args = parse_args()
     start_time = time.time()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print("device:", device)
+    device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu') )
+    # device = torch.device('cpu')
     # global_path = '/home/haolun/projects/ctb-lcharlin/haolun/LLM4Rec_User_Summary'
-    global_path = '/Users/haolunwu/Documents/GitHub/LLM4Rec_User_Summary'
+    # global_path = '/Users/haolunwu/Documents/GitHub/LLM4Rec_User_Summary'
+    #set the global path enviroment variable as the path to the project not dependant on the machine
+    global_path = os.path.dirname(os.path.abspath(__file__))
+  
 
     built_context = build_context(global_path)
 
     user_genre_file = f"{global_path}/data_preprocessed/{args.data_name}/user_genre.json"
+
     user_genre_dataloader = get_dataloader(user_genre_file, batch_size=args.batch_size, num_users=args.num_users, user_start=764, user_end=1000)
     num_of_batch = len(user_genre_dataloader)
     print("Num of batch:", num_of_batch)
 
     if args.mode == 'sum':
-        user_summary_list = in_context_user_summary(built_context, args.model_name, device, args.data_name,
+        user_summary_list = in_context_user_summary(global_path , built_context, args.model_name, device, args.data_name,
                                                     user_genre_dataloader, args.in_context, args.only_title)
 
     # for batch in dataloader:

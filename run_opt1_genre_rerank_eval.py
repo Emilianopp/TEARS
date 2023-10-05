@@ -93,6 +93,3 @@ for user_id, genre_rr in bprmf_user_genre_rr.items():
             target_user_genre_pairs.append((user_id, genre))
             print(f"User {user_id}, Genre {genre}, GPT + BPRMF RR: {gpt_bprmf_user_genre_rr[user_id][genre]:.4f}")
 
-# import json
-# with open('/Users/haolunwu/Documents/GitHub/LLM4Rec_User_Summary/saved_model/ml-100k/target_user_genre_pairs.json', 'w') as f:
-#     json.dump(target_user_genre_pairs, f, indent=4)

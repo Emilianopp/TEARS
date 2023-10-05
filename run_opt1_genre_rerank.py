@@ -6,16 +6,17 @@ from data.dataloader import get_dataloader
 import re
 from torch.utils.data import DataLoader, Subset
 import torch
+import os
 
-access_token = "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"
-if torch.cuda.is_available():
-    device = torch.device('cuda')
-    global_path = '/home/haolun/projects/ctb-lcharlin/haolun/LLM4Rec_User_Summary'
-else:
-    device = torch.device('cpu')
-    global_path = '/Users/haolunwu/Documents/GitHub/LLM4Rec_User_Summary'
+# access_token = "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"
+# if torch.cuda.is_available():
+#     device = torch.device('cuda')
+#     global_path = '/home/haolun/projects/ctb-lcharlin/haolun/LLM4Rec_User_Summary'
+# else:
+#     device = torch.device('cpu')
+#     global_path = '/Users/haolunwu/Documents/GitHub/LLM4Rec_User_Summary'
 
-
+global_path = os.path.dirname(os.path.abspath(__file__))
 
 def generate_text_openai(prompts, model_name, device):
     MAX_RETRIES = 3

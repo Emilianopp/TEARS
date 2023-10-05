@@ -14,13 +14,39 @@ from model.MF import MatrixFactorization
 from helper.eval_metrics import precision_at_k, recall_at_k, mapk, ndcg_k
 from helper.dataloader import load_dataset, map_title_to_id, convert_titles_to_ids, \
     create_train_matrix_and_actual_lists
-
+import argparse
+import wandb
 logging.basicConfig(level=logging.DEBUG)
 logging.getLogger('matplotlib.font_manager').disabled = True
 logger = logging.getLogger(__name__)
 
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
+
+def parse_args():  # Parse command line arguments
+    parser = argparse.ArgumentParser(description="LLM4RecSys")
+    parser.add_argument("--data_name", default='ml-100k', type=str)
+    parser.add_argument("--log_file", default= 'model_logs/ml-100k/logging_llmMF.csv', type=str)
+    parser.add_argument("--model_name", default='BPRMF', type=str)
+    parser.add_argument("--embedding_dim" , default=1536, type=int)
+    parser.add_argument("--output_emb" , default=64, type=int)
+    parser.add_argument("--top_for_rerank" , default=50, type=int)
+    parser.add_argument("--num_layers" , default=4, type=int)
+    parser.add_argument("--batch_size", default=4, type=int)
+    parser.add_argument("--epochs", default=10, type=int)
+    parser.add_argument("--topk", default=20, type=int)
+    parser.add_argument("--train", default=False, type=bool)
+    
+    parser.add_argument("--num_neg", default=1, type=int)
+    parser.add_argument("--lr", default=.001, type=float)
+    parser.add_argument("--wd", default=0, type=float)
+    
+
+    
+    args = parser.parse_args([])
+    args.device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu') )
+
+    return args
 
 
 def convert_ids_to_genres(filename):
@@ -110,7 +136,6 @@ def compute_metrics(test_set, pred_list, topk=20):
 
 def generate_rankings_for_all_users(model, num_users, num_items):
     rankings = np.zeros((num_users, num_items), dtype=int)
-
     # For each user, generate scores for all items, then rank the items
     for user_id in range(num_users):
         user_id_tensor = torch.tensor([user_id], device=model.device)
@@ -169,13 +194,17 @@ def generate_and_save_rankings_json(rankings_matrix, topk, top_for_rerank, movie
 
 
 def main_MF(args):
+    experiment_name = f"{args.model_name}_{time.strftime('%Y-%m-%d %H:%M:%S')}"
+    wandb.init(project='llm4rec', name=experiment_name)
+    wandb.config.update(args)
+    wandb.watch_called = False  # To avoid re-watching the model
     t_start = time.time()
     # 1. Data Loading & Preprocessing
-    train_data = load_dataset("../data_preprocessed/ml-100k/data_split/train_set_leave_one.json")
-    valid_data = load_dataset("../data_preprocessed/ml-100k/data_split/valid_set_leave_one.json")
-    test_data = load_dataset("../data_preprocessed/ml-100k/data_split/test_set_leave_one.json")
-    movie_title_to_id = map_title_to_id("../data/ml-100k/movies.dat")
-
+    train_data = load_dataset("./data_preprocessed/ml-100k/data_split/train_set_leave_one.json")
+    valid_data = load_dataset("./data_preprocessed/ml-100k/data_split/valid_set_leave_one.json")
+    test_data = load_dataset("./data_preprocessed/ml-100k/data_split/test_set_leave_one.json")
+    movie_title_to_id = map_title_to_id("./data/ml-100k/movies.dat")
+    
     train_data = convert_titles_to_ids(train_data, movie_title_to_id)
     valid_data = convert_titles_to_ids(valid_data, movie_title_to_id)
     test_data = convert_titles_to_ids(test_data, movie_title_to_id)
@@ -203,7 +232,7 @@ def main_MF(args):
     best_recall = 0.0
     patience = 10  # Number of epochs to wait for recall to improve
     counter = 0
-    model_save_path = f'../saved_model/ml-100k/{args.model_name}'
+    model_save_path = f'./saved_model/ml-100k/{args.model_name}'
 
     # 3. Training Loop
     model.train()
@@ -224,12 +253,15 @@ def main_MF(args):
             loss += batch_loss.item()
 
         print(f"Epoch {epoch + 1}/{args.epochs}, Loss: {loss / num_batches}")
+        wandb.log({'Loss': loss / num_batches})
+        
 
         # Check Recall@20 on validation
         model.eval()
         pred_list_val = generate_pred_list(model, train_matrix, topk=20)
         recall_val = recall_at_k(actual_list_val, pred_list_val, 20)
         # print(f"Validation Recall@20: {recall_val}")
+        wandb.log({'Validation Recall@20': recall_val})
 
         # Early stopping check
         if recall_val > best_recall:
@@ -246,15 +278,6 @@ def main_MF(args):
     # Load best model for evaluation
     model.load_state_dict(torch.load(f"{model_save_path}_best_model.pth"))
     model.eval()
-
-    # Validation set results (optional: you might want to skip this as we've evaluated during training)
-    # pred_list_val = generate_pred_list(model, train_matrix, topk=args.topk)
-    # precision_val = precision_at_k(actual_list_val, pred_list_val, args.topk)
-    # recall_val = recall_at_k(actual_list_val, pred_list_val, args.topk)
-    # ndcg_val = ndcg_k(actual_list_val, pred_list_val, args.topk)
-    # print(f"Validation Precision@{args.topk}: {precision_val}")
-    # print(f"Validation Recall@{args.topk}: {recall_val}")
-    # print(f"Validation NDCG@{args.topk}: {ndcg_val}")
 
     # Test set results
     pred_list_test = generate_pred_list(model, train_matrix, topk=args.topk)
@@ -274,10 +297,10 @@ def main_MF(args):
     np.save(f"{model_save_path}_rankings_matrix.npy", rankings_matrix)
     print("rankings_matrix:", rankings_matrix)
 
-    movie_id_to_genres = convert_ids_to_genres("../data/ml-100k/movies.dat")
+    movie_id_to_genres = convert_ids_to_genres("./data/ml-100k/movies.dat")
     generate_and_save_rankings_json(rankings_matrix, args.topk, args.top_for_rerank, movie_id_to_genres,
                                     f"{model_save_path}_user_genre_rankings.json",
-                                    "../data_preprocessed/ml-100k/user_genre.json")
+                                    "./data_preprocessed/ml-100k/user_genre.json")
 
     return model, rankings_matrix
 
@@ -296,5 +319,5 @@ if __name__ == "__main__":
         model_name = 'BPRMF'
 
 
-    args = Arguments()
+    args = parse_args()
     model, rankings_matrix = main_MF(args)

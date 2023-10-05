@@ -59,12 +59,12 @@ def generate_text(prompts, model_name, device):
                                                      cache_dir=model_dir,
                                                      trust_remote_code=True).to(device)
     elif model_name == 'llama2':
-        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf",
+        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-3b-hf",
                                                   cache_dir=model_dir,
                                                   trust_remote_code=True,
                                                   use_auth_token=access_token,
                                                   padding_side='left')
-        model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf",
+        model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-2-3b-hf",
                                                      cache_dir=model_dir,
                                                      trust_remote_code=True,
                                                      use_auth_token=access_token).to(device)

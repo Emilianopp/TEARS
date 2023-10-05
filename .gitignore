@@ -4,3 +4,8 @@
 data/
 data_preprocessed/
 cc/
+.env
+wandb/
+*.pyc
+saved_LLM/
+saved_model/*

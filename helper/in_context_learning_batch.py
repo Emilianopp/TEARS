@@ -10,14 +10,15 @@ import re
 import openai
 from tenacity import retry, wait_exponential, stop_after_attempt
 from tqdm import tqdm
+from dotenv import load_dotenv
 
-access_token = "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"
-# global_path = '/home/haolun/projects/ctb-lcharlin/haolun/LLM4Rec_User_Summary'
-global_path = '/Users/haolunwu/Documents/GitHub/LLM4Rec_User_Summary'
+# access_token = "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"
+# # global_path = '/home/haolun/projects/ctb-lcharlin/haolun/LLM4Rec_User_Summary'
+# global_path = '/Users/emilianopenaloza/Git/LLM4Rec/saved_user_summary/'
 
 
 def load_tokenizer_model(model_name, device):
-    model_dir = '/home/haolun/projects/ctb-lcharlin/haolun/saved_LLM'
+    model_dir = './saved_LLM'
     if 't5' in model_name:
         tokenizer = AutoTokenizer.from_pretrained("google/{}".format(model_name),
                                                   cache_dir=model_dir,
@@ -46,8 +47,9 @@ def load_tokenizer_model(model_name, device):
                                                      cache_dir=model_dir,
                                                      trust_remote_code=True,
                                                      use_auth_token=access_token).to(device)
-
-    tokenizer.pad_token = tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    added_toks = tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+  
+    # tokenizer.pad_token = tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     return tokenizer, model
 
 
@@ -58,6 +60,7 @@ def generate_text(prompts, tokenizer, model, device):
     encoding = tokenizer(input_strings, return_tensors='pt', padding=True, truncation=True, max_length=1024).to(
         device)
     input_ids = encoding['input_ids']
+
     attention_mask = encoding['attention_mask']
 
     max_length = max([len(seq) for seq in input_ids]) + 50
@@ -95,8 +98,11 @@ def generate_text_openai(prompts, model_name, device):
             # real_model_name = 'text-davinci-003'
         elif model_name == 'gpt4':
             real_model_name = 'gpt-4'
-
-        openai.api_key = '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'  # Set your OpenAI API key
+        current_directory = os.getcwd()
+        load_dotenv(".env")
+        openai.api_key = os.getenv("OPEN-AI-SECRET")
+        
+        # openai.api_key = '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'  # Set your OpenAI API key
 
         messages_contents = []
         if real_model_name in ['gpt-3.5-turbo', 'gpt-3.5-turbo-16k']:
@@ -159,7 +165,7 @@ def generate_text_openai(prompts, model_name, device):
         return messages_contents
 
 
-def save_to_file(user_summary_dict, global_path, data_name, model_name, in_context, only_title):
+def save_to_file(global_path,user_summary_dict, global_path, data_name, model_name, in_context, only_title):
     save_path = f'{global_path}/saved_user_summary/{data_name}/user_summary_{model_name}_in{in_context}_title{only_title}.json'
 
     # Load existing data from file
@@ -182,7 +188,7 @@ def save_to_file(user_summary_dict, global_path, data_name, model_name, in_conte
         json.dump(existing_data, f)
 
 
-def in_context_user_summary(built_context, model_name, device, data_name, dataloader, in_context, only_title):
+def in_context_user_summary(global_path,built_context, model_name, device, data_name, dataloader, in_context, only_title):
     # Load model
     num_last_movies = 10
     if model_name in ['gpt3.5', 'gpt4']:
@@ -191,7 +197,7 @@ def in_context_user_summary(built_context, model_name, device, data_name, datalo
         tokenizer, model = load_tokenizer_model(model_name, device)
     # Load the training set JSON file
     with open(
-            f'{global_path}/data_preprocessed/{data_name}/train_set_leave_one.json') as input_file:
+            f'{global_path}/data_preprocessed/{data_name}/data_split/train_set_leave_one.json') as input_file:
         user_data_input = json.load(input_file)
 
     # Pre-build the demonstration examples string
@@ -275,7 +281,7 @@ def in_context_user_summary(built_context, model_name, device, data_name, datalo
 
     # Check for any remaining data after all batches are processed
     if user_summary_dict:
-        save_to_file(user_summary_dict, global_path, data_name, model_name, in_context, only_title)
+        save_to_file(global_path,user_summary_dict, global_path, data_name, model_name, in_context, only_title)
 
 
 def in_context_retrieval(built_context, user_id_genre_pairs, user_summary_lists, movie_candidates_list, model_name,
