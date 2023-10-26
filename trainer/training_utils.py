@@ -197,14 +197,6 @@ def log_results_csv(log_file,log_data):
         df.to_csv(log_file, index=False)
  
  
- 
-def get_open_ai_embeddings(num_users_retrieved, user_summaries,model="text-embedding-ada-002"):
-     
-    user_summary_subset = user_summaries[num_users_retrieved:]
-    summarize_summaries_prompt_list = summarize_summaries_prompt(user_summary_subset)
-    text = [x.replace("\n", " ") for x in summarize_summaries_prompt_list ]
-    return openai.Embedding.create(input = text, model=model)['data']
-
 
 def json_to_list(data):
     summaries = []
@@ -303,34 +295,52 @@ def summarize_summaries_augmented_prompt(user_summaries,sentiment = '',excluded_
 
     return prompts, excluded_genre_users
 
-def get_summary_embeddings():
-    embeddings_path = "saved_summary_embeddings/ml-100k/embeddings.json"
-    user_summaries = 'saved_user_summary/ml-100k/user_summary_gpt3.5_in1_title0_full.json'
+# def get_summary_embeddings():
+#     embeddings_path = "saved_summary_embeddings/ml-100k/embeddings.json"
+#     user_summaries = 'saved_user_summary/ml-100k/user_summary_gpt3.5_in1_title0_full.json'
     
-    with open(user_summaries, "r") as f:
-            user_summaries = json.load(f)
-            user_summaries = json_to_list(user_summaries)
-            total_users = len(user_summaries)
+#     with open(user_summaries, "r") as f:
+#             user_summaries = json.load(f)
+#             user_summaries = json_to_list(user_summaries)
+#             total_users = len(user_summaries)
             
-    if os.path.exists(embeddings_path):
-        with open(embeddings_path, "r") as f:
-            num_users_retrieved = len(json.load(f))
-    else: 
-        num_users_retrieved = 0
-    if num_users_retrieved == total_users:
-        print('Loading saved embeddings')
-        return json.load(open(embeddings_path, "r"))
-    else:
-        new_embeddings = get_open_ai_embeddings(num_users_retrieved, user_summaries)
-        if num_users_retrieved < total_users:
-            with open(embeddings_path, "a") as f:
-                json.dump(new_embeddings, f, indent=4)
-        elif 0==num_users_retrieved:
-            with open(embeddings_path, "w") as f:
-                json.dump(new_embeddings, f, indent=4)
-        print('Wrote Embeddings')
-        return new_embeddings
+#     if os.path.exists(embeddings_path):
+#         with open(embeddings_path, "r") as f:
+#             num_users_retrieved = len(json.load(f))
+#     else: 
+#         num_users_retrieved = 0
+#     if num_users_retrieved == total_users:
+#         print('Loading saved embeddings')
+#         return json.load(open(embeddings_path, "r"))
+#     else:
+#         new_embeddings = get_open_ai_embeddings(num_users_retrieved, user_summaries)
+#         if num_users_retrieved < total_users:
+#             with open(embeddings_path, "a") as f:
+#                 json.dump(new_embeddings, f, indent=4)
+#         elif 0==num_users_retrieved:
+#             with open(embeddings_path, "w") as f:
+#                 json.dump(new_embeddings, f, indent=4)
+#         print('Wrote Embeddings')
+#         return new_embeddings
 
+def get_embedding_module(embedding_module):
+    if embedding_module == 'openai':
+        return get_open_ai_embeddings
+    elif embedding_module == 't5':
+        return get_t5_embeddings
+    
+
+        
+
+def get_genrewise_embeddings(user_genre_summaries,args,model):
+        embedding_module = get_embedding_module(args.embedding_module)
+        genre_embeddings = {}
+        for genre, summaries in user_genre_summaries.items():
+
+            embeddings = embedding_module(summaries,args,model)
+            genre_embeddings[genre] = embeddings
+        return genre_embeddings
+    
     
 def trim_dictionary(data, thresh):
     trimmed_data = {
@@ -423,31 +433,57 @@ def dump_json(path,data):
         json.dump(data , f, indent=4)
     
     
-    
-def get_t5_embeddings( user_summaries,args,prompt_dict,augmented =False): 
-    
-    model = SentenceTransformer('sentence-transformers/sentence-t5-large').to(args.device)
+def get_encoder_inputs( user_summaries,args,prompt_dict=None,augmented =False):
     prompt_dict = get_prompts( user_summaries,args,augmented) if prompt_dict is None else prompt_dict
     prompts = [x for i,x in prompt_dict.items()]
+    return prompts,prompt_dict
+    
+    
+def get_t5_embeddings( prompts,args,model = None): 
+    
+    
+    model = SentenceTransformer('sentence-transformers/sentence-t5-large').to(args.device) if model is not None else model
     embeddings = model.encode(prompts)
 
+    return torch.tensor(embeddings)
 
-
-
-    return torch.tensor(embeddings),prompt_dict
+def get_t5():
+    model = SentenceTransformer('sentence-transformers/sentence-t5-large')
+    return model
     
 
-def get_open_ai_embeddings( user_summaries,args,prompt_dict,augmented = False): 
-    prompt_dict = get_prompts (user_summaries,args,augmented)  if prompt_dict is None else prompt_dict
-    prompts = [x for i,x in prompt_dict.items()]
+def get_open_ai_embeddings( prompts, args,model = None): 
+
     embeddings_response = openai.Embedding.create(input = prompts, model="text-embedding-ada-002")
 
     embeddings = [x['embedding'] for x in embeddings_response['data']]
 
 
-    return torch.tensor(embeddings),prompt_dict
+    return torch.tensor(embeddings)
 
-
+def get_genres():
+    genre_dict = {
+    "unknown": 0,
+    "Action": 1,
+    "Adventure": 2,
+    "Animation": 3,
+    "Children's": 4,
+    "Comedy": 5,
+    "Crime": 6,
+    "Documentary": 7,
+    "Drama": 8,
+    "Fantasy": 9,
+    "Film-Noir": 10,
+    "Horror": 11,
+    "Musical": 12,
+    "Mystery": 13,
+    "Romance": 14,
+    "Sci-Fi": 15,
+    "Thriller": 16,
+    "War": 17,
+    "Western": 18
+    }
+    return genre_dict
 
 
 def parse_args():  # Parse command line arguments
@@ -465,8 +501,10 @@ def parse_args():  # Parse command line arguments
     parser.add_argument("--batch_size", default=4, type=int)
     parser.add_argument("--epochs", default=3, type=int)
     parser.add_argument("--topk", default=20, type=int)
+    parser.add_argument("--attention_emb", default=512, type=int)
     parser.add_argument("--train", default=True, type=bool)
     parser.add_argument("--num_neg", default=1, type=int)
+    parser.add_argument("--num_heads", default=4, type=int)
     parser.add_argument("--lr", default=.0001, type=float)
     parser.add_argument("--wd", default=0, type=float)
     parser.add_argument('--make_embeddings', action='store_true')

@@ -91,7 +91,7 @@ def get_recs(args,augmented = False):
     embedding_dim = user_embeddings.shape[1]
     print(f"{embedding_dim=}")
     
-    
+
     user_embedder = decoderMLP(embedding_dim, args.num_layers ,args.output_emb) 
 
     

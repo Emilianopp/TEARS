@@ -27,6 +27,11 @@ def get_summary_embeddings(args):
     embeddings_path = f"saved_summary_embeddings/ml-100k/embeddings_{args.model_name}.pt"
     user_summaries_path = 'saved_user_summary/ml-100k/user_summary_gpt3.5_in1_title0_full.json'
     prompts_path = f"saved_summary_embeddings/ml-100k/prompt_dict_{args.model_name}.json"
+    
+
+
+    
+    
     embedding_function = get_open_ai_embeddings if args.embedding_module == 'openai' else get_t5_embeddings 
 
     user_summaries = load_dataset(user_summaries_path)
@@ -35,9 +40,9 @@ def get_summary_embeddings(args):
 
     if args.make_embeddings: 
         prompt_dict = load_dataset(user_summaries_path)
+        prompts,prompt_dict = get_encoder_inputs( user_summaries,args,prompt_dict,augmented =True)
 
-
-        embeddings,prompt_dict = embedding_function( user_summaries,args, prompt_dict) 
+        embeddings,prompt_dict = embedding_function( prompts,args) 
         torch.save(torch.tensor(embeddings), f"saved_summary_embeddings/ml-100k/embeddings_{args.model_name}.pt")
         dump_json(prompts_path,prompt_dict)
     else: 
@@ -45,12 +50,7 @@ def get_summary_embeddings(args):
 
     return embeddings
         
-            
-
-
-
 # def train_decoder(model):
-    
 def train_model(args):
     t_start = time.time()
     experiment_name = f"{args.model_name}_{time.strftime('%Y-%m-%d %H:%M:%S')}"
