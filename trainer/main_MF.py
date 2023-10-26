@@ -100,14 +100,11 @@ def generate_pred_list(model, train_matrix, topk=20):
                 end = num_users
             else:
                 break
-
         batch_user_index = user_indexes[start:end]
         batch_user_ids = torch.from_numpy(np.array(batch_user_index)).type(torch.LongTensor).to(args.device)
-
         rating_pred = model.predict(batch_user_ids)
         rating_pred = rating_pred.cpu().data.numpy().copy()
         rating_pred[train_matrix[batch_user_index].toarray() > 0] = 0
-
         # reference: https://stackoverflow.com/a/23734295, https://stackoverflow.com/a/20104162
         ind = np.argpartition(rating_pred, -topk)
         ind = ind[:, -topk:]
@@ -140,7 +137,6 @@ def generate_rankings_for_all_users(model, num_users, num_items):
     for user_id in range(num_users):
         user_id_tensor = torch.tensor([user_id], device=model.device)
         scores = model.predict(user_id_tensor).squeeze().cpu().detach().numpy()
-
         # Get the items' indices sorted by their scores in descending order
         ranked_items = np.argsort(scores)[::-1]
 

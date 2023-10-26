@@ -1,6 +1,6 @@
 import torch
 import math
-
+import numpy as np
 
     
     
@@ -194,6 +194,25 @@ def build_topk_list_tensor(user_emb, item_emb, train_user_list, test_user_list, 
     return result
 
 
+def ndcg_k_genre(predicted,actual, genre,topk,num_genres):
+    results_list = []
+
+    for user_id in range(len(predicted)):
+        user_list =[]
+        for i in range(num_genres):
+            k = min(topk, len(actual[user_id]))
+            idcg = idcg_k(k)
+            # print(f"{predicted[user_id][0]=}")
+            if len (genre[user_id]) <= i:
+                
+                user_list.append(np.nan)
+                continue
+            
+  
+            dcg_k = sum([int(genre[user_id][i] in set(predicted[user_id][j])) / math.log(j + 2, 2) for j in range(topk)])
+            user_list.append(dcg_k / idcg)
+        results_list.append(user_list)
+    return results_list
 
 
 

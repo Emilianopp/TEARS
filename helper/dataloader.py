@@ -1,14 +1,17 @@
 import json
+import pickle
 import numpy as np
 from scipy.sparse import csr_matrix
-
+from collections import defaultdict
 
 # Load datasets
 def load_dataset(file_path):
     with open(file_path, 'r') as f:
         return json.load(f)
 
-
+def load_pickle(file_path):
+    with open(file_path, 'rb') as f:
+        return pickle.load(f)
 # Create a mapping from movie titles to movie IDs
 def map_title_to_id(movies_file):
     with open(movies_file, 'r') as f:
@@ -50,6 +53,31 @@ def convert_titles_to_ids(dataset, title_to_id_map):
                 del items['title']
     return dataset
 
+
+def create_full_dataset_matrix(full_data,movie_title_to_id):
+
+    num_users = max([int(user) for user in full_data.keys()])
+    num_movies = max(movie_title_to_id.values())
+
+    # Create an empty matrix with dimensions (num_users, num_movies)
+    full_matrix = [[0 for _ in range(num_movies)] for _ in range(num_users)]
+
+    for user_id, genre_data in full_data.items():
+        for genre, items in genre_data.items():
+            if isinstance(items, list):
+                for item in items:
+                    full_matrix[int(user_id) - 1][item['movieId'] - 1] = 1
+            else:
+                full_matrix[int(user_id) - 1][items['movieId'] - 1] = 1
+    return full_matrix
+def create_full_data(train_data,val_data,test_data):
+    output_dict = defaultdict(dict)
+    for user,item in train_data.items():
+        for genre,movie_list in item.items():
+
+            output_dict[user][genre] = movie_list +[ val_data[user][genre],test_data[user][genre]]
+    return output_dict 
+    
 
 def create_train_matrix_and_actual_lists(train_data, valid_data, test_data, movie_title_to_id):
     num_users = max([int(user) for user in train_data.keys()])

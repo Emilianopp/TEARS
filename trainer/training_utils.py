@@ -1,3 +1,9 @@
+from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
+import openai
+import pickle 
+import argparse
+from typing import List
 import sys
 import logging
 import numpy as np
@@ -9,13 +15,22 @@ import torch
 from scipy.sparse import csr_matrix
 import os 
 import pandas as pd
-
+from collections import defaultdict
 from helper.sampler import NegSampler, negsamp_vectorized_bsearch_preverif
 from argparse import ArgumentParser
 from model.MF import MatrixFactorization
 from helper.eval_metrics import precision_at_k, recall_at_k, mapk, ndcg_k
 from helper.dataloader import load_dataset, map_title_to_id, convert_titles_to_ids, \
     create_train_matrix_and_actual_lists
+
+#flatten a nested dict to get all the counts 
+
+def get_max_counts(d):
+    max_counts = []
+    for user_id, genre_counts in d.items():
+        min_count = max(genre_counts.values())
+        max_counts.append(min_count)
+    return max_counts
 
 def convert_ids_to_genres(filename):
     """
@@ -52,10 +67,11 @@ def neg_item_pre_sampling(train_matrix, num_neg_candidates=500):
     return user_neg_items
 
 
-def generate_pred_list(model, train_matrix,args,user_embeddings, topk=20,summary_encoder = None):
+def generate_pred_list(model, train_matrix,args,user_embeddings, topk=20,summary_encoder = None,top100 = False,print_emb = False):
     num_users = train_matrix.shape[0]
     batch_size = 1024
     num_batches = int(num_users / batch_size) + 1
+    print(f"{num_batches=}")
     user_indexes = np.arange(num_users)
     pred_list = None
 
@@ -68,14 +84,17 @@ def generate_pred_list(model, train_matrix,args,user_embeddings, topk=20,summary
                 end = num_users
             else:
                 break
-
-        batch_user_index = user_indexes[start:end]
-    
-       
+        batch_user_index = user_indexes[start:end ] if not top100 else user_indexes[:100]
+        
+   
 
         batch_user_emb = user_embeddings[batch_user_index].to(args.device)
+       
+        rating_pred = model.predict_recon(batch_user_emb,summary_encoder) if args.recon else  model.predict(batch_user_emb,print_emb = print_emb)
 
-        rating_pred = model.predict_recon(batch_user_emb,summary_encoder) if args.recon else  model.predict(batch_user_emb)
+       
+
+
         rating_pred = rating_pred.cpu().data.numpy().copy()
         rating_pred[train_matrix[batch_user_index].toarray() > 0] = 0
 
@@ -177,3 +196,284 @@ def log_results_csv(log_file,log_data):
         df = df.append(log_data, ignore_index=True)
         df.to_csv(log_file, index=False)
  
+ 
+ 
+def get_open_ai_embeddings(num_users_retrieved, user_summaries,model="text-embedding-ada-002"):
+     
+    user_summary_subset = user_summaries[num_users_retrieved:]
+    summarize_summaries_prompt_list = summarize_summaries_prompt(user_summary_subset)
+    text = [x.replace("\n", " ") for x in summarize_summaries_prompt_list ]
+    return openai.Embedding.create(input = text, model=model)['data']
+
+
+def json_to_list(data):
+    summaries = []
+    for key, genre_summaries in data.items():
+            summaries.append(genre_summaries)
+    return summaries
+
+def get_summary_function(summary_style, user_summary_subset ):
+    if summary_style == 'original':
+        return summarize_summaries_prompt(user_summary_subset)
+    elif summary_style == 'topM':
+        user_genre_counts_full = load_pickle('./saved_summary_embeddings/ml-100k/genre_counts.pkl')
+        user_genre_counts = trim_dictionary(user_genre_counts_full, 5)
+        return summarize_summaries_prompt_topM(user_summary_subset,user_genre_counts)
+    elif summary_style == 'augmented':
+        return summarize_summaries_augmented_prompt(user_summary_subset)
+    
+
+def summarize_summaries_prompt(user_summaries): 
+    role_prompt = 'The following are the summaries of movies watched by the user, in the format genre: summary. \n'
+    prompts = []
+    for user in user_summaries:
+        summary_prompt = ""
+        for genre, summary in user.items():
+            summary_prompt += f"{genre}: {summary}\n"
+        prompts += [role_prompt + summary_prompt]
+    with open("saved_summary_embeddings/ml-100k/prompts_original.txt", "w") as f:
+        for prompt in prompts:
+            f.write(prompt)
+            f.write("\n")    
+    
+    return prompts,None
+
+def summarize_summaries_prompt_topM(user_summaries,genre_counts): 
+    role_prompt = 'The following are the summaries of movies watched by the user, in the format genre: summary. \n'
+    prompts = []
+    for k,user in enumerate(user_summaries):
+        summary_prompt = ""
+        for genre, summary in user.items():
+            if genre in list(genre_counts[k].keys()):
+                summary_prompt += f"{genre}: {summary}\n"
+        prompts += [role_prompt + summary_prompt]
+    with open("saved_summary_embeddings/ml-100k/prompts_topM.txt", "w") as f:
+        for prompt in prompts:
+            f.write(prompt)
+            f.write("\n")    
+    
+    return prompts,None
+
+
+def summarize_summaries_augmented_prompt(user_summaries,sentiment = '',excluded_genres=3,max_exclude = True): 
+    role_prompt = 'The following are the summaries of movies watched by the user, in the format genre: summary. \n'
+    prompts = []
+    excluded_genre_users =defaultdict(list)
+    user_key_lengths = []
+    # load saved_summary_embeddings/ml-100k/genre_counts.pkl
+    with open("saved_summary_embeddings/ml-100k/genre_counts.pkl", "rb") as f:
+        genre_counts = pickle.load(f)
+
+    for i,user in enumerate(user_summaries):
+
+    
+        summary_prompt = ""
+        '''
+        Test this works once the model is trained
+        '''
+        random_genre = np.random.choice(list(user.keys()),excluded_genres) if not max_exclude else [max(genre_counts[i], key=genre_counts[i].get)] 
+        
+
+        sentiment_prompt = 'The user has a really negative opinion about this genre, as well as a negative opinion of the summary. \n' if sentiment != '' else ''
+
+
+        for genre, summary in user_summaries[user].items():
+
+            if  genre in random_genre:
+
+                excluded_genre_users[i].append( genre)
+                if max_exclude:
+
+                    continue
+                if sentiment == '':
+                    continue
+                elif sentiment == 'negative':
+                    sentiment_prompt += f"{genre}: {summary}\n"
+                    continue
+            summary_prompt += f"{genre}: {summary}\n"
+        
+        prompts += [role_prompt + summary_prompt + sentiment_prompt]
+    #save prompts to a text file 
+    with open("saved_summary_embeddings/ml-100k/prompts_augmented.txt", "w") as f:
+        for prompt in prompts:
+            f.write(prompt)
+            f.write("\n")    
+   
+
+
+    return prompts, excluded_genre_users
+
+def get_summary_embeddings():
+    embeddings_path = "saved_summary_embeddings/ml-100k/embeddings.json"
+    user_summaries = 'saved_user_summary/ml-100k/user_summary_gpt3.5_in1_title0_full.json'
+    
+    with open(user_summaries, "r") as f:
+            user_summaries = json.load(f)
+            user_summaries = json_to_list(user_summaries)
+            total_users = len(user_summaries)
+            
+    if os.path.exists(embeddings_path):
+        with open(embeddings_path, "r") as f:
+            num_users_retrieved = len(json.load(f))
+    else: 
+        num_users_retrieved = 0
+    if num_users_retrieved == total_users:
+        print('Loading saved embeddings')
+        return json.load(open(embeddings_path, "r"))
+    else:
+        new_embeddings = get_open_ai_embeddings(num_users_retrieved, user_summaries)
+        if num_users_retrieved < total_users:
+            with open(embeddings_path, "a") as f:
+                json.dump(new_embeddings, f, indent=4)
+        elif 0==num_users_retrieved:
+            with open(embeddings_path, "w") as f:
+                json.dump(new_embeddings, f, indent=4)
+        print('Wrote Embeddings')
+        return new_embeddings
+
+    
+def trim_dictionary(data, thresh):
+    trimmed_data = {
+        user: {genre: count for genre, count in genres.items() if count > thresh}
+        for user, genres in data.items()
+    }
+    return trimmed_data
+
+def load_pickle(filename):
+    with open(filename, "rb") as f:
+        return pickle.load(f)
+    
+def get_prompts(user_summaries,args,augmented):
+    user_summary_subset = user_summaries
+    if augmented: 
+        summary_style = 'augmented'
+    else:
+        summary_style = args.summary_style
+        
+    summarize_summaries_prompt_list,excluded_genres = get_summary_function(summary_style, user_summary_subset)
+    if excluded_genres is not None: 
+        excluded_genres_dict = f"saved_summary_embeddings/ml-100k/excluded_genres.pkl"
+        with open(excluded_genres_dict, "wb") as f:
+            pickle.dump(excluded_genres, f)
+
+    text = [x.replace("\n", " ") for x in summarize_summaries_prompt_list ]
+    promp_dict = {}
+
+    for i,t in (pbar := tqdm(enumerate(text))):
+        
+        msg =[{
+                "role": "system",
+                "content": "Provide a description of these movie summaries. Only summarize the text and suggest types of movies that the user might like. \
+                    Do not directly include any movie titles or genres. When you can describe two genres the user likes together do so. Be concise with about 200 characters but descriptive.\
+                    This is an example of inputs:\
+                    Action: Summary: Action-packed movies from the 90s with a mix of cyberpunk, post-apocalyptic, and martial arts themes. These films feature intense action sequences and are directed by renowned filmmakers.,\
+                    Drama: Summary: A collection of drama films ranging from disaster survival, epic Western, historical biographical, romantic, and psychological thriller. These films explore themes of love, loss, personal struggles, and the human condition.,\
+                    Romance: Summary: A collection of romantic movies from various genres including drama, comedy, musical, and fantasy. These films explore themes of love and relationships, featuring a mix of well-known actors and diverse storylines.,\
+                    Sci-Fi: Summary: A collection of sci-fi films ranging from space operas to post-apocalyptic adventures, with elements of cyberpunk and dystopia. The movies explore themes of technology, survival, and thrilling action, featuring memorable characters and imaginative settings.,\
+                    Thriller: Summary: A collection of thrilling movies with elements of crime, suspense, and science fiction. The films feature a variety of genres including erotic thriller, cyberpunk, and independent drama. The cast includes notable actors such as Ray Liotta, Linda Fiorent,\
+                    Crime: Summary: A collection of crime films from the mid-90s, including gangster comedies, epic crime dramas, cyberpunk thrillers, and action-packed sci-fi flicks.,\
+                    Comedy: Summary: A collection of comedy films spanning different themes and genres, including children's comedy, adventure comedy fantasy, prank calls, historical comedy-drama, action comedy, romantic comedy, and farce black comedy.,\
+                    Children: Summary: A collection of coming-of-age, fantasy, adventure, comedy, and family films that will entertain children and provide a fun and enjoyable experience.,\
+                    Adventure: Summary: Adventure movies from the 1990s with a mix of drama, fantasy, and superhero themes.,\
+                    Animation: Summary: Animated films that belong to the Animation genre, providing entertainment with adventure, music, and historical themes.,\
+                    Fantasy: Summary: A collection of fantasy films ranging from family adventures to magical realism, including stories about mythical creatures, mystical worlds, and extraordinary quests.,\
+                    Documentary: Summary: A collection of documentary films exploring various subjects, including basketball dreams, mockumentary, hip-hop music, Hollywood's infamous madam, fashion models, and notable individuals like Nico and Jean Seberg. The films offer a glimpse into different worlds,\
+                    Mystery: Summary: A collection of mysterious and suspenseful films that explore crime, psychological thrillers, and science fiction. These movies delve into the world of detectives, investigations, and the after-effects of unexpected events.,\
+                    Horror: Summary: A collection of horror films that explore vampires, psychological thrillers, and supernatural elements. A vampire gothic horror, a vampire black comedy, a psychological thriller, an action horror, a fantasy thriller, a direct-to-video horror, and a,\
+                    War: Summary: A collection of war-inspired films from various genres, including action thrillers, historical dramas, biographical dramas, satirical comedies, and dramatic portrayals of real-life events.\
+                    This is the resulting output summary: \
+                    Based on your movie preferences, you enjoy a variety of genres. You seem to enjoy dramas that tackle various themes such as romance, religion, comedy, feminism, and social issues. You also enjoy intense thrillers with elements of horror, mystery, crime, and cyberpunk. Adventure movies with thrilling escapades, mysterious secrets, and a touch of danger appeal to you as well. Additionally, you seem to be a fan of romance films from the 1990s that explore love, relationships, and personal growth. Comedies with various themes, including romantic comedy, road trips, screwball antics, and drag queens are also favorites of yours. Crime films with thrilling mysteries, engaging drama, and a touch of cybercrime catch your interest. Lastly, action-packed films from the 1990s with elements of crime, cyberpunk, and thrilling adventures also seem to be enjoyable for you."            },            {
+                "role": "user",
+                "content": text[i]
+            }
+            ]
+
+        try:
+            prompts = openai.ChatCompletion.create(model="gpt-3.5-turbo",   
+                                                messages=msg,                                    
+                                    max_tokens=200  # limit the token length of response
+                                )['choices'][0]['message']['content']
+            promp_dict[i] = prompts
+            pbar.set_description(f"Prompt {i + 1}/{len(text)}")
+    
+        except Exception as e:
+            prompts = None
+            j = 0 
+            while prompts is None:
+                try:
+                    print(f"{e=} exception occured have tried {j} times")
+                    pbar.set_description(f"Timeout exception: {e}. Sleeping for a minute and retrying.")
+                    time.sleep(60)
+                    prompts = openai.ChatCompletion.create(model="gpt-3.5-turbo",   
+                                                    messages=msg,
+                                        max_tokens=200  # limit the token length of response
+                                    )['choices'][0]['message']['content']
+
+                    pbar.set_description(f"Request {i} completed")
+                    j+=1
+                except Exception as e:
+                    prompts = None
+    
+    return promp_dict
+
+
+
+def dump_json(path,data):
+      with open(path, "w") as f:
+        json.dump(data , f, indent=4)
+    
+    
+    
+def get_t5_embeddings( user_summaries,args,prompt_dict,augmented =False): 
+    
+    model = SentenceTransformer('sentence-transformers/sentence-t5-large').to(args.device)
+    prompt_dict = get_prompts( user_summaries,args,augmented) if prompt_dict is None else prompt_dict
+    prompts = [x for i,x in prompt_dict.items()]
+    embeddings = model.encode(prompts)
+
+
+
+
+    return torch.tensor(embeddings),prompt_dict
+    
+
+def get_open_ai_embeddings( user_summaries,args,prompt_dict,augmented = False): 
+    prompt_dict = get_prompts (user_summaries,args,augmented)  if prompt_dict is None else prompt_dict
+    prompts = [x for i,x in prompt_dict.items()]
+    embeddings_response = openai.Embedding.create(input = prompts, model="text-embedding-ada-002")
+
+    embeddings = [x['embedding'] for x in embeddings_response['data']]
+
+
+    return torch.tensor(embeddings),prompt_dict
+
+
+
+
+def parse_args():  # Parse command line arguments
+    parser = argparse.ArgumentParser(description="LLM4RecSys")
+    parser.add_argument("--data_name", default='ml-100k', type=str)
+    parser.add_argument("--log_file", default= 'model_logs/ml-100k/logging_llmMF.csv', type=str)
+    parser.add_argument("--model_name", default='MFLLM', type=str)
+    parser.add_argument("--model_save_path", default='./saved_model/ml-100k', type=str)
+    parser.add_argument("--summary_style", default='topM', type=str)
+    parser.add_argument("--embedding_module", default='openai', type=str)
+    parser.add_argument("--embedding_dim" , default=1536, type=int)
+    parser.add_argument("--output_emb" , default=64, type=int)
+    parser.add_argument("--top_for_rerank" , default=50, type=int)
+    parser.add_argument("--num_layers" , default=3, type=int)
+    parser.add_argument("--batch_size", default=4, type=int)
+    parser.add_argument("--epochs", default=3, type=int)
+    parser.add_argument("--topk", default=20, type=int)
+    parser.add_argument("--train", default=True, type=bool)
+    parser.add_argument("--num_neg", default=1, type=int)
+    parser.add_argument("--lr", default=.0001, type=float)
+    parser.add_argument("--wd", default=0, type=float)
+    parser.add_argument('--make_embeddings', action='store_true')
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--make_augmented', action='store_true')
+
+    args = parser.parse_args()
+    args.recon = False
+    args.device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu') )
+    return args

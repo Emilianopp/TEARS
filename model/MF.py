@@ -122,10 +122,13 @@ class MatrixFactorizationLLM(nn.Module):
     
     def get_user_embeddings():
         pass
-    def predict(self, user_emb):
+    def predict(self, user_emb,print_emb = False):
         user_emb = self.user_embeddings(user_emb)
-       
+
         pred = user_emb @ self.item_embeddings.weight.t()
+        if print_emb:
+            print(f"{'='*20 } \n {pred=} \n{'='*20}")
+            torch.save(pred, f'saved_summary_embeddings/ml-100k/user_emb_val.pt')
 
         return pred
 
