@@ -88,7 +88,7 @@ class MatrixFactorizationLLM(nn.Module):
         
         
         self.user_embeddings = user_embedder
-        self.item_embeddings = nn.Embedding(self.num_items, args.output_emb).to(self.device)
+        self.item_embeddings = nn.Embedding(self.num_items, args.output_emb).to(self.device) 
         # self.user_embeddings.weight.data = torch.nn.init.xavier_uniform_(self.user_embeddings.weight.data)
         self.user_embeddings.apply(init_weights)
         self.item_embeddings.weight.data = torch.nn.init.xavier_uniform_(self.item_embeddings.weight.data)
@@ -117,8 +117,9 @@ class MatrixFactorizationLLM(nn.Module):
         user_emb ,pos_emb, neg_emb = \
             self.user_embeddings(user),self.item_embeddings(pos_id), self.item_embeddings(neg_id)
 
+
         return  user_emb, pos_emb, neg_emb
-    
+  
     
     def get_user_embeddings():
         pass
@@ -126,9 +127,7 @@ class MatrixFactorizationLLM(nn.Module):
         user_emb = self.user_embeddings(user_emb)
 
         pred = user_emb @ self.item_embeddings.weight.t()
-        if print_emb:
-            print(f"{'='*20 } \n {pred=} \n{'='*20}")
-            torch.save(pred, f'saved_summary_embeddings/ml-100k/user_emb_val.pt')
+
 
         return pred
 

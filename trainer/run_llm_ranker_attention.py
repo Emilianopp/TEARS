@@ -14,16 +14,17 @@ from dotenv import load_dotenv
 from model.MF import MatrixFactorizationLLM
 from model.decoderMLP import decoderMLP, decoderAttention
 import argparse
+from torch.optim.lr_scheduler import LambdaLR
 from helper.eval_metrics import precision_at_k, recall_at_k, mapk, ndcg_k
 from helper.dataloader import load_dataset, map_title_to_id, convert_titles_to_ids, \
     create_train_matrix_and_actual_lists
 from .training_utils import *
 import wandb
 from tqdm import tqdm
+import math
 
 def get_user_genre_embeddings(args):
-    if args.make_embeddings:
-            
+    if args.make_embeddings:   
         with open('saved_user_summary/ml-100k/user_summary_gpt3.5_in1_title0_full.json','r') as f: 
             user_summaries = json.load(f)
             user_summaries = {int(k):v for k,v in user_summaries.items()}
@@ -76,15 +77,24 @@ def train_model(args):
     num_users, num_items = train_matrix.shape
     # user_embeddings = torch.tensor(get_summary_embeddings(args))
     user_embeddings  = get_user_genre_embeddings(args)
+
     print('made embeddings')
-    embedding_dim = user_embeddings[1].shape[1]
+
+
+
+
     
-    user_embedder = decoderAttention(args.attention_emb,args.num_heads,embedding_dim)
+    embedding_dim = user_embeddings[1][list(user_embeddings[1].keys())[0]].shape[0]
+    
+    user_embedder = decoderAttention(embedding_dim,args.num_heads,args.num_layers ,args.output_emb) 
     
     model = MatrixFactorizationLLM(num_users, user_embedder,num_items, args).to(args.device)
 
+    lr_lambda = lambda step: 0.5 * (1 + math.cos(step / args.total_steps * math.pi))  # Cosine decay
 
+    # Create a LambdaLR scheduler that adjusts the learning rate
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    scheduler = LambdaLR(optimizer, lr_lambda)
 
     # Create negative sampler
     neg_sampler = NegSampler(train_matrix, pre_samples, batch_size=args.batch_size, num_neg=args.num_neg)
@@ -92,9 +102,8 @@ def train_model(args):
 
     # Early stopping parameters
     best_recall = 0.0
-    patience = 10  # Number of epochs to wait for recall to improve
+    patience = 50  # Number of epochs to wait for recall to improve
     counter = 0
-    model_save_path = f'./saved_model/ml-100k/{args.model_name}'
 
 
     # user_embeddings= torch.tensor([user_embeddings[i]['embedding'] for i in range(len(user_embeddings))])
@@ -103,8 +112,7 @@ def train_model(args):
     genre_list = get_genres()
 
 
-    print(f"{user_embeddings[1]=}")
-    exit(0)
+
 
     # 3. Training Loop
     if args.train:
@@ -116,13 +124,18 @@ def train_model(args):
                 # user_inp = 
                 
                 user_id, pos, neg = batch_user_id, batch_item_id, np.squeeze(neg_samples)
+
                 
                 #this needs to change to a dict of user embeddings
-                user_genre_dict = user_embeddings[user_id].to(args.device)
-                user_tensor = model.prepare_input(user_genre_dict, genre_list)
-                
 
-                user_emb, pos_emb, neg_emb = model(user_tensor, pos, neg)
+
+
+                all_user_genre_dict = [user_embeddings[u+1] for u in user_id]
+
+                user_list = [ model.user_embeddings.prepare_input(user_genre_dict, genre_list) for user_genre_dict in all_user_genre_dict]
+                user_tensor = torch.stack(user_list).to(args.device)
+
+                user_emb, pos_emb, neg_emb = model.forward(user_tensor, pos, neg)
 
                 batch_loss = model.bpr_loss(user_emb, pos_emb, neg_emb)
                 batch_loss = torch.mean(batch_loss)
@@ -131,20 +144,25 @@ def train_model(args):
                 batch_loss.backward()
                 optimizer.step()
                 loss += batch_loss.item()
+                if args.cosine:
+                    scheduler.step
                 pbar.set_description(f"Epoch {batch + 1}/{num_batches}, Loss: {loss / (batch+1)}")
                 
-            
+                if args.debug:
+                    break
                 # print(f"Epoch {_ + 1}/{num_batches}, Loss: {loss /( _ + 1)}")
-            wandb.log({'Loss': loss / num_batches})
+            if not args.debug:
+                wandb.log({'Loss': loss / num_batches})
 
 
             print(f"Epoch {epoch + 1}/{args.epochs}, Loss: {loss / num_batches}")
 
             # Check Recall@20 on validation
             model.eval()
-            pred_list_val = generate_pred_list(model, train_matrix,args,user_embeddings, topk=20, print_emb=True)
+            pred_list_val = generate_pred_list_attention(model, train_matrix,args,user_embeddings, topk=20, print_emb=True)
             recall_val = recall_at_k(actual_list_val, pred_list_val, 20)
-            wandb.log({'Validation Recall@20': recall_val})
+            if not args.debug:
+                wandb.log({'Validation Recall@20': recall_val}) 
             
             print(f"Validation Recall@20: {recall_val}")
 
@@ -154,32 +172,36 @@ def train_model(args):
             if recall_val > best_recall:
                 best_recall = recall_val
                 counter = 0
+                best_epoch = epoch
                 # Save the model
 
                 #write the pred list val to a pickle file 
-                with open(f"/Users/emilianopenaloza/Git/LLM4Rec/saved_summary_embeddings/ml-100k/pred_list_val.pkl", "wb") as f:
+                with open(f"saved_summary_embeddings/ml-100k/pred_list_val.pkl", "wb+") as f:
                     pickle.dump(pred_list_val, f)
-                torch.save(model.state_dict(), f"{model_save_path}_best_model.pth")
-                torch.save(model.user_embeddings.state_dict(), f"{model_save_path}_user_embedder.pth")
-                print(f'wrote model to {model_save_path}')
+                torch.save(model.state_dict(), f"{args.model_save_name}_best_model.pth")
+                torch.save(model.user_embeddings.state_dict(), f"{args.model_save_name}_embedder.pth")
+                print(f'wrote model to {args.model_save_name}')
             else:
                 counter += 1
-                if counter >= patience:
-                    print("Early stopping triggered.")
+                
+                if counter >= patience or torch.isnan(batch_loss).any():
+                    print("Early stopping triggered.",f'{batch_loss=}')
+                    break
                     
-            
+            if args.debug:
+                break
         # 4. Evaluation
         # Load best model for evaluation
 
-        model.load_state_dict(torch.load(f"{model_save_path}_best_model.pth"))
+        model.load_state_dict(torch.load(f"{args.model_save_name}_best_model.pth"))
         model.eval()
     else:
-        model.load_state_dict(torch.load(f"{model_save_path}_best_model.pth"))
+        model.load_state_dict(torch.load(f"{args.model_save_name}_best_model.pth"))
         model.eval()
 
 
     # Test set results
-    pred_list_test = generate_pred_list(model, train_matrix,args,user_embeddings, topk=args.topk)
+    pred_list_test = generate_pred_list_attention(model, train_matrix,args,user_embeddings, topk=args.topk)
     actual_list_test = actual_list_test  # Adjust based on your data format
     precision_test = precision_at_k(actual_list_test, pred_list_test, args.topk)
     recall_test = recall_at_k(actual_list_test, pred_list_test, args.topk)
@@ -195,24 +217,26 @@ def train_model(args):
         'recall_test': recall_test,
         'recall_val': recall_val,
         'args.num_layers': args.num_layers,
-        'args.lr': args.lr
+        'args.lr': args.lr,
+        'args.num_heads':args.num_heads,
+        'args.epochs' : args.epochs
     }
     log_results_csv( args.log_file,log_data)
        
 
     # Save pretrained embeddings
-    torch.save(model.user_embeddings.state_dict(), f"{model_save_path}_user_embeddings.pth")
-    torch.save(model.item_embeddings.weight.data, f"{model_save_path}_item_embeddings.pth")
+    torch.save(model.user_embeddings.state_dict(), f"{args.model_save_name}_user_embeddings.pth")
+    torch.save(model.item_embeddings.weight.data, f"{args.model_save_name}_item_embeddings.pth")
 
     
 
-    rankings_matrix = generate_rankings_for_all_users(model, num_users=num_users, num_items=num_items,user_emb=user_embeddings,args=args)
-    np.save(f"{model_save_path}_rankings_matrix.npy", rankings_matrix)
+    rankings_matrix = generate_rankings_for_all_users_attention(model, num_users=num_users, num_items=num_items,user_emb=user_embeddings,args=args)
+    np.save(f"{args.model_save_name}_rankings_matrix.npy", rankings_matrix)
     print("rankings_matrix:", rankings_matrix)
 
     movie_id_to_genres = convert_ids_to_genres("./data/ml-100k/movies.dat")
     generate_and_save_rankings_json(rankings_matrix, args.topk, args.top_for_rerank, movie_id_to_genres,
-                                    f"{model_save_path}_user_genre_rankings.json",
+                                    f"{args.model_save_name}_user_genre_rankings.json",
                                     "./data_preprocessed/ml-100k/user_genre.json")
     
     if not args.debug:

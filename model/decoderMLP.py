@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import rff
+
 
 
 class decoderMLP(nn.Module):
@@ -44,14 +44,27 @@ class decoderMLP(nn.Module):
         return torch.mean(torch.mean((pred - target)**2, dim=0))
     
 class decoderAttention(nn.Module):
-    def __init__(self, decoderAttention,embedding_dim,num_heads,dropout=0.25):
-        super (decoderAttention, self).__init__()
-        self.attnModule = nn.MultiheadAttention(embedding_dim, num_heads, dropout=dropout)
-        self.embedding_dim = embedding_dim // num_heads
+    def __init__(self,attention_dim,num_heads,num_layers_mlp,output_emb_mlp,dropout=0.25):
+       
+        super(decoderAttention, self).__init__()
+
+        self.attnModule = nn.MultiheadAttention(attention_dim, num_heads, dropout=dropout,batch_first= True)
+        
+        self.mlp_shrinker = decoderMLP(attention_dim,num_layers_mlp,output_emb_mlp) 
+        self.embedding_dim = attention_dim 
+        
         
     def forward(self, x):
-        return self.attnModule(x)
-    
+
+        h,_= self.attnModule(x,x,x)
+
+        h = h.mean(axis = 1 )
+        
+        h = self.mlp_shrinker(h)
+
+        
+        return h
+
     def prepare_input(self,genre_dict, genres_list):
         # List to store genre embeddings
         genre_embeddings = []
@@ -61,15 +74,18 @@ class decoderAttention(nn.Module):
                 genre_embeddings.append(genre_dict[genre])
             else:
                 # If the genre is missing, pad it with zeros
-                genre_embeddings.append(torch.zeros(1, self.embedding_dim))
+                genre_embeddings.append(torch.zeros( self.embedding_dim))
+
 
         # Concatenate the genre embeddings along a new dimension (e.g., dim=1)
-        input_tensor = torch.cat(genre_embeddings, dim=1)
+
+        input_tensor = torch.stack(genre_embeddings,dim = 0)
+
 
         return input_tensor
-    def make_kqv_mask(self, x):
-        
-        return 
-        
+  
     
+    
+
+        
      

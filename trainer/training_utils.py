@@ -89,6 +89,7 @@ def generate_pred_list(model, train_matrix,args,user_embeddings, topk=20,summary
    
 
         batch_user_emb = user_embeddings[batch_user_index].to(args.device)
+
        
         rating_pred = model.predict_recon(batch_user_emb,summary_encoder) if args.recon else  model.predict(batch_user_emb,print_emb = print_emb)
 
@@ -112,6 +113,56 @@ def generate_pred_list(model, train_matrix,args,user_embeddings, topk=20,summary
 
     return pred_list
 
+def generate_pred_list_attention(model, train_matrix,args,user_embeddings, topk=20,summary_encoder = None,top100 = False,print_emb = False):
+    num_users = train_matrix.shape[0]
+    batch_size = 4
+    num_batches = int(num_users / batch_size) + 1
+    print(f"{num_batches=}")
+    user_indexes = np.arange(num_users)
+    pred_list = None
+
+    for batchID in range(num_batches):
+        start = batchID * batch_size
+        end = start + batch_size
+
+        if batchID == num_batches - 1:
+            if start < num_users:
+                end = num_users
+            else:
+                break
+            
+        genre_list = get_genres()
+        batch_user_index = user_indexes[start:end ] if not top100 else user_indexes[:100] 
+
+        
+   
+        all_user_genre_dict = [user_embeddings[u+1] for u in batch_user_index]
+
+        user_list = [ model.user_embeddings.prepare_input(user_genre_dict, genre_list) for user_genre_dict in all_user_genre_dict]
+        user_tensor = torch.stack(user_list).to(args.device)
+
+       
+        rating_pred =   model.predict(user_tensor,print_emb = print_emb)
+
+       
+
+
+        rating_pred = rating_pred.cpu().data.numpy().copy()
+        rating_pred[train_matrix[batch_user_index].toarray() > 0] = 0
+
+        # reference: https://stackoverflow.com/a/23734295, https://stackoverflow.com/a/20104162
+        ind = np.argpartition(rating_pred, -topk)
+        ind = ind[:, -topk:]
+        arr_ind = rating_pred[np.arange(len(rating_pred))[:, None], ind]
+        arr_ind_argsort = np.argsort(arr_ind)[np.arange(len(rating_pred)), ::-1]
+        batch_pred_list = ind[np.arange(len(rating_pred))[:, None], arr_ind_argsort]
+
+        if batchID == 0:
+            pred_list = batch_pred_list
+        else:
+            pred_list = np.append(pred_list, batch_pred_list, axis=0)
+
+    return pred_list
 
 def compute_metrics(test_set, pred_list, topk=20):
     precision, recall, MAP, ndcg = [], [], [], []
@@ -125,13 +176,17 @@ def compute_metrics(test_set, pred_list, topk=20):
 
 
 def generate_rankings_for_all_users(model,user_emb, num_users, num_items,args):
+    
     rankings = np.zeros((num_users, num_items), dtype=int)
 
     # For each user, generate scores for all items, then rank the items
     for user_id in range(num_users):
 
+
         user_id_tensor = user_emb[user_id].to(args.device)
-        scores = model.predict(user_id_tensor).squeeze().cpu().detach().numpy()
+
+
+        scores = model.predict(user_id_tensor)
 
         # Get the items' indices sorted by their scores in descending order
         ranked_items = np.argsort(scores)[::-1]
@@ -141,6 +196,27 @@ def generate_rankings_for_all_users(model,user_emb, num_users, num_items,args):
 
     return rankings
 
+def generate_rankings_for_all_users_attention(model,user_emb, num_users, num_items,args):
+    rankings = np.zeros((num_users, num_items), dtype=int)
+
+    # For each user, generate scores for all items, then rank the items
+    genre_list = get_genres()
+    
+    for user_id in range(num_users):
+
+        user_id_tensor = user_emb[user_id+1]
+
+        user_id_tensor = model.user_embeddings.prepare_input(user_id_tensor, genre_list).unsqueeze(0).to(args.device)
+
+        scores = model.predict(user_id_tensor).squeeze().cpu().detach().numpy()
+
+        # Get the items' indices sorted by their scores in descending order
+        ranked_items = np.argsort(scores)[::-1]
+
+        # Store the ranked item IDs in the matrix
+        rankings[user_id] = ranked_items
+
+    return rankings
 
 def generate_and_save_rankings_json(rankings_matrix, topk, top_for_rerank, movie_id_to_genres, filename,
                                     user_genre_file):
@@ -193,7 +269,7 @@ def log_results_csv(log_file,log_data):
     else:
         # Append to the existing CSV file
         df = pd.read_csv(log_file)
-        df = df.append(log_data, ignore_index=True)
+        df = df._append(log_data, ignore_index=True)
         df.to_csv(log_file, index=False)
  
  
@@ -443,6 +519,7 @@ def get_t5_embeddings( prompts,args,model = None):
     
     
     model = SentenceTransformer('sentence-transformers/sentence-t5-large').to(args.device) if model is not None else model
+
     embeddings = model.encode(prompts)
 
     return torch.tensor(embeddings)
@@ -491,7 +568,7 @@ def parse_args():  # Parse command line arguments
     parser.add_argument("--data_name", default='ml-100k', type=str)
     parser.add_argument("--log_file", default= 'model_logs/ml-100k/logging_llmMF.csv', type=str)
     parser.add_argument("--model_name", default='MFLLM', type=str)
-    parser.add_argument("--model_save_path", default='./saved_model/ml-100k', type=str)
+
     parser.add_argument("--summary_style", default='topM', type=str)
     parser.add_argument("--embedding_module", default='openai', type=str)
     parser.add_argument("--embedding_dim" , default=1536, type=int)
@@ -501,6 +578,7 @@ def parse_args():  # Parse command line arguments
     parser.add_argument("--batch_size", default=4, type=int)
     parser.add_argument("--epochs", default=3, type=int)
     parser.add_argument("--topk", default=20, type=int)
+    parser.add_argument("--total_steps", default=1000, type=int)
     parser.add_argument("--attention_emb", default=512, type=int)
     parser.add_argument("--train", default=True, type=bool)
     parser.add_argument("--num_neg", default=1, type=int)
@@ -509,9 +587,13 @@ def parse_args():  # Parse command line arguments
     parser.add_argument("--wd", default=0, type=float)
     parser.add_argument('--make_embeddings', action='store_true')
     parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--cosine', action='store_true')
     parser.add_argument('--make_augmented', action='store_true')
 
     args = parser.parse_args()
     args.recon = False
     args.device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu') )
+    args.model_save_path = f'./saved_model/ml-100k/{args.model_name}'
+    args.model_save_name = f"{args.model_save_path}_best_model_{args.lr}_{args.epochs}_{args.num_heads}_{args.cosine}_{args.num_layers}.pth"
+
     return args
