@@ -44,7 +44,7 @@ class decoderMLP(nn.Module):
         return torch.mean(torch.mean((pred - target)**2, dim=0))
     
 class decoderAttention(nn.Module):
-    def __init__(self,attention_dim,num_heads,num_layers_mlp,output_emb_mlp,dropout=0.25):
+    def __init__(self,attention_dim,num_heads,num_layers_mlp,output_emb_mlp,num_layers = 2 ,dropout=0.25):
        
         super(decoderAttention, self).__init__()
 
@@ -87,5 +87,49 @@ class decoderAttention(nn.Module):
     
     
 
+class movieTransformer(nn.Module):
+    def __init__(self,attention_dim,num_heads,num_layers_mlp,output_emb_mlp,num_layers = 2 ,dropout=0.25):
+       
+        super(movieTransformer, self).__init__()
         
-     
+        #make a loop to make transformer layers
+
+        self.nn_list= nn.ModuleList()
+
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=attention_dim, nhead=num_heads, dim_feedforward=attention_dim, dropout=dropout, activation='relu')
+        self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
+        self.mlp_shrinker = decoderMLP(attention_dim,num_layers_mlp,output_emb_mlp) 
+        self.embedding_dim = attention_dim 
+        
+
+    def forward(self, x):
+
+        h = self.transformer_encoder(x)
+        h = h.mean(axis = 1 )
+        h = self.mlp_shrinker(h)
+
+        
+        return h
+
+    
+    def prepare_input(self,genre_dict, genres_list):
+        # List to store genre embeddings
+        genre_embeddings = []
+
+        for genre in genres_list:
+            if genre in genre_dict:
+                genre_embeddings.append(genre_dict[genre])
+            else:
+                # If the genre is missing, pad it with zeros
+                genre_embeddings.append(torch.zeros( self.embedding_dim))
+
+
+        # Concatenate the genre embeddings along a new dimension (e.g., dim=1)
+
+        input_tensor = torch.stack(genre_embeddings,dim = 0)
+
+
+        return input_tensor
+  
+    
+    

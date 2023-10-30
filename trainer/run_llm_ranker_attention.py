@@ -34,9 +34,9 @@ def get_user_genre_embeddings(args):
         for user, summaries in tqdm(user_summaries.items()):
             user_embeddings[user] = get_genrewise_embeddings(summaries,args,model)
         print ('got embeddings')
-        torch.save(user_embeddings, f"saved_summary_embeddings/ml-100k/user_embeddings_{args.model_name}.pt")
+        torch.save(user_embeddings, f"saved_summary_embeddings/ml-100k/user_embeddings_{args.emb_type}.pt")
     else:
-        user_embeddings = torch.load(f"saved_summary_embeddings/ml-100k/user_embeddings_{args.model_name}.pt")
+        user_embeddings = torch.load(f"saved_summary_embeddings/ml-100k/user_embeddings_{args.emb_type}.pt")
     return user_embeddings
         
             
@@ -86,7 +86,10 @@ def train_model(args):
     
     embedding_dim = user_embeddings[1][list(user_embeddings[1].keys())[0]].shape[0]
     
-    user_embedder = decoderAttention(embedding_dim,args.num_heads,args.num_layers ,args.output_emb) 
+    
+    
+    user_embedder = get_model(args.model_name)(embedding_dim,args.num_heads,args.num_layers,args.output_emb,args.num_layers_transformer )
+
     
     model = MatrixFactorizationLLM(num_users, user_embedder,num_items, args).to(args.device)
 

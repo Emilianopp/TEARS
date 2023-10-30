@@ -1,4 +1,5 @@
 from sentence_transformers import SentenceTransformer
+from model.decoderMLP import decoderMLP, decoderAttention, movieTransformer
 from tqdm import tqdm
 import openai
 import pickle 
@@ -406,7 +407,11 @@ def get_embedding_module(embedding_module):
         return get_t5_embeddings
     
 
-        
+def get_model(model_name):
+    if  model_name == 'transformer': 
+        return movieTransformer
+    elif model_name == 'attention':
+        return decoderAttention       
 
 def get_genrewise_embeddings(user_genre_summaries,args,model):
         embedding_module = get_embedding_module(args.embedding_module)
@@ -568,6 +573,8 @@ def parse_args():  # Parse command line arguments
     parser.add_argument("--data_name", default='ml-100k', type=str)
     parser.add_argument("--log_file", default= 'model_logs/ml-100k/logging_llmMF.csv', type=str)
     parser.add_argument("--model_name", default='MFLLM', type=str)
+    parser.add_argument("--emb_type", default='attn', type=str)
+    
 
     parser.add_argument("--summary_style", default='topM', type=str)
     parser.add_argument("--embedding_module", default='openai', type=str)
@@ -575,6 +582,7 @@ def parse_args():  # Parse command line arguments
     parser.add_argument("--output_emb" , default=64, type=int)
     parser.add_argument("--top_for_rerank" , default=50, type=int)
     parser.add_argument("--num_layers" , default=3, type=int)
+    parser.add_argument("--num_layers_transformer" , default=3, type=int)
     parser.add_argument("--batch_size", default=4, type=int)
     parser.add_argument("--epochs", default=3, type=int)
     parser.add_argument("--topk", default=20, type=int)
