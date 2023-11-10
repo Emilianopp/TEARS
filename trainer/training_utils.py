@@ -372,33 +372,6 @@ def summarize_summaries_augmented_prompt(user_summaries,sentiment = '',excluded_
 
     return prompts, excluded_genre_users
 
-# def get_summary_embeddings():
-#     embeddings_path = "saved_summary_embeddings/ml-100k/embeddings.json"
-#     user_summaries = 'saved_user_summary/ml-100k/user_summary_gpt3.5_in1_title0_full.json'
-    
-#     with open(user_summaries, "r") as f:
-#             user_summaries = json.load(f)
-#             user_summaries = json_to_list(user_summaries)
-#             total_users = len(user_summaries)
-            
-#     if os.path.exists(embeddings_path):
-#         with open(embeddings_path, "r") as f:
-#             num_users_retrieved = len(json.load(f))
-#     else: 
-#         num_users_retrieved = 0
-#     if num_users_retrieved == total_users:
-#         print('Loading saved embeddings')
-#         return json.load(open(embeddings_path, "r"))
-#     else:
-#         new_embeddings = get_open_ai_embeddings(num_users_retrieved, user_summaries)
-#         if num_users_retrieved < total_users:
-#             with open(embeddings_path, "a") as f:
-#                 json.dump(new_embeddings, f, indent=4)
-#         elif 0==num_users_retrieved:
-#             with open(embeddings_path, "w") as f:
-#                 json.dump(new_embeddings, f, indent=4)
-#         print('Wrote Embeddings')
-#         return new_embeddings
 
 def get_embedding_module(embedding_module):
     if embedding_module == 'openai':
@@ -416,10 +389,12 @@ def get_model(model_name):
 def get_genrewise_embeddings(user_genre_summaries,args,model):
         embedding_module = get_embedding_module(args.embedding_module)
         genre_embeddings = {}
+        
         for genre, summaries in user_genre_summaries.items():
 
             embeddings = embedding_module(summaries,args,model)
             genre_embeddings[genre] = embeddings
+            
         return genre_embeddings
     
     
@@ -507,8 +482,6 @@ def get_prompts(user_summaries,args,augmented):
     
     return promp_dict
 
-
-
 def dump_json(path,data):
       with open(path, "w") as f:
         json.dump(data , f, indent=4)
@@ -521,8 +494,7 @@ def get_encoder_inputs( user_summaries,args,prompt_dict=None,augmented =False):
     
     
 def get_t5_embeddings( prompts,args,model = None): 
-    
-    
+
     model = SentenceTransformer('sentence-transformers/sentence-t5-large').to(args.device) if model is not None else model
 
     embeddings = model.encode(prompts)
@@ -568,7 +540,7 @@ def get_genres():
     return genre_dict
 
 
-def parse_args():  # Parse command line arguments
+def parse_args(notebook = False):  # Parse command line arguments
     parser = argparse.ArgumentParser(description="LLM4RecSys")
     parser.add_argument("--data_name", default='ml-100k', type=str)
     parser.add_argument("--log_file", default= 'model_logs/ml-100k/logging_llmMF.csv', type=str)
@@ -598,7 +570,7 @@ def parse_args():  # Parse command line arguments
     parser.add_argument('--cosine', action='store_true')
     parser.add_argument('--make_augmented', action='store_true')
 
-    args = parser.parse_args()
+    args = parser.parse_args() if not notebook else parser.parse_args(args=[])
     args.recon = False
     args.device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu') )
     args.model_save_path = f'./saved_model/ml-100k/{args.model_name}'

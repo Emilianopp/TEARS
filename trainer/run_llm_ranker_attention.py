@@ -80,16 +80,9 @@ def train_model(args):
 
     print('made embeddings')
 
-
-
-
-    
     embedding_dim = user_embeddings[1][list(user_embeddings[1].keys())[0]].shape[0]
     
-    
-    
     user_embedder = get_model(args.model_name)(embedding_dim,args.num_heads,args.num_layers,args.output_emb,args.num_layers_transformer )
-
     
     model = MatrixFactorizationLLM(num_users, user_embedder,num_items, args).to(args.device)
 
