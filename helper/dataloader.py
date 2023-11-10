@@ -39,6 +39,19 @@ def map_id_to_title(movies_file):
 
     return mapping
 
+def map_id_to_genre(movies_file):
+    with open(movies_file, 'r') as f:
+        lines = f.readlines()
+
+    mapping = {}
+    for line in lines:
+        tokens = line.split("::")
+        movie_id = int(tokens[0])
+        title = tokens[2].strip('\n')
+        mapping[movie_id] = title
+
+    return mapping
+
 
 # Convert movie titles in a dataset to their corresponding IDs
 def convert_titles_to_ids(dataset, title_to_id_map):

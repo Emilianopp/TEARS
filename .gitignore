@@ -9,3 +9,11 @@ wandb/
 *.pyc
 saved_LLM/
 saved_model/*
+# Ignore all files and folders
+
+
+# Except .py files
+!*.py
+
+*.pth
+*.json

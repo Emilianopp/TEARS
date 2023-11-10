@@ -34,6 +34,19 @@ def recall_at_k(actual, predicted, topk):
     return sum_recall / true_users
 
 
+def recall_at_k_one(actual, predicted, topk):
+    sum_recall = 0.0
+    num_users = len(predicted)
+    true_users = 0
+
+    act_set = set(actual)
+    pred_set = set(predicted[:topk])
+    if len(act_set) != 0:
+        sum_recall += len(act_set & pred_set) / float(len(act_set))
+        true_users += 1
+    return sum_recall / true_users
+
+
 def recall_at_k_list(actual, predicted, topk):
     res = []
     sum_recall = 0.0

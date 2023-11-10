@@ -80,15 +80,14 @@ class MatrixFactorization(nn.Module):
 class MatrixFactorizationLLM(nn.Module):
     def __init__(self, num_users, user_embedder,num_items, args):
         super(MatrixFactorizationLLM, self).__init__()
-
+        
         self.device = args.device
         self.num_users = num_users
         self.num_items = num_items
         self.dim = args.output_emb
-        
-        
         self.user_embeddings = user_embedder
         self.item_embeddings = nn.Embedding(self.num_items, args.output_emb).to(self.device) 
+        
         # self.user_embeddings.weight.data = torch.nn.init.xavier_uniform_(self.user_embeddings.weight.data)
         self.user_embeddings.apply(init_weights)
         self.item_embeddings.weight.data = torch.nn.init.xavier_uniform_(self.item_embeddings.weight.data)
@@ -124,7 +123,9 @@ class MatrixFactorizationLLM(nn.Module):
     def get_user_embeddings():
         pass
     def predict(self, user_emb,print_emb = False):
+        print('hi')
         user_emb = self.user_embeddings(user_emb)
+
 
         pred = user_emb @ self.item_embeddings.weight.t()
 

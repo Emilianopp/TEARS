@@ -221,8 +221,6 @@ if __name__ == '__main__':
     args = parse_args()
     recs_augmented,data_matrix = get_recs(args,augmented = True)
     excluded_genres = {int(k):v for k,v in load_pickle('saved_summary_embeddings/ml-100k/excluded_genres.pkl').items()}
-
-    
     print('GOT AUGMENTED SUMMARIES')
     
     recs_original,_ = get_recs(args)
@@ -233,18 +231,13 @@ if __name__ == '__main__':
     user_genres_augmented_count = count_user_genres(recs_augmented,movie_id_to_genres)
     
     user_genres_original_count = count_user_genres(recs_original,movie_id_to_genres)
-
     
     user_genres_true = count_user_genres(data_matrix,movie_id_to_genres)
     row_indices, col_indices = np.where(data_matrix== 1)
 
-
-    
     user_genres_true = convert_recs_to_genres(data_matrix,movie_id_to_genres)
     user_genres_original = convert_recs_to_genres(recs_original,movie_id_to_genres)
     user_genres_augmented = convert_recs_to_genres(recs_augmented,movie_id_to_genres)
-
-    
     
     out_original = ndcg_k_genre(user_genres_original[:100],user_genres_true[:100],excluded_genres,args.topk,1)
     out_augmented = ndcg_k_genre(user_genres_augmented[:100],user_genres_true[:100],excluded_genres,args.topk,1)
