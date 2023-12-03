@@ -22,6 +22,7 @@ from .training_utils import *
 import wandb
 from tqdm import tqdm
 import math
+from torch.nn.parallel import DataParallel
 
 def get_user_genre_embeddings(args):
     if args.make_embeddings:   
@@ -47,9 +48,9 @@ def get_user_genre_embeddings(args):
     
 def train_model(args):
     t_start = time.time()
-    experiment_name = f"{args.model_name}_{time.strftime('%Y-%m-%d %H:%M:%S')}"
+
     if not args.debug:
-        wandb.init(project='llm4rec', name=experiment_name)
+        wandb.init(project='llm4rec', name=args.model_log_name)
         wandb.config.update(args)
         wandb.watch_called = False  # To avoid re-watching the model
 
@@ -85,6 +86,12 @@ def train_model(args):
     user_embedder = get_model(args.model_name)(embedding_dim,args.num_heads,args.num_layers,args.output_emb,args.num_layers_transformer )
     
     model = MatrixFactorizationLLM(num_users, user_embedder,num_items, args).to(args.device)
+    if torch.cuda.device_count() < 1:
+        print(f"Using {torch.cuda.device_count()} GPUs.")
+        model = DataParallel(model)
+        module = model.module
+    else:
+        module = model 
 
     lr_lambda = lambda step: 0.5 * (1 + math.cos(step / args.total_steps * math.pi))  # Cosine decay
 
@@ -93,12 +100,12 @@ def train_model(args):
     scheduler = LambdaLR(optimizer, lr_lambda)
 
     # Create negative sampler
-    neg_sampler = NegSampler(train_matrix, pre_samples, batch_size=args.batch_size, num_neg=args.num_neg)
+    neg_sampler = NegSampler(train_matrix, pre_samples, batch_size=args.batch_size*torch.cuda.device_count(), num_neg=args.num_neg)
     num_batches = train_matrix.count_nonzero() // args.batch_size
 
     # Early stopping parameters
     best_recall = 0.0
-    patience = 50  # Number of epochs to wait for recall to improve
+    patience = 100  # Number of epochs to wait for recall to improve
     counter = 0
 
 
@@ -117,23 +124,21 @@ def train_model(args):
             loss = 0.0
             for batch in range(num_batches):
                 batch_user_id, batch_item_id, neg_samples = neg_sampler.next_batch()
-                # user_inp = 
                 
                 user_id, pos, neg = batch_user_id, batch_item_id, np.squeeze(neg_samples)
 
-                
-                #this needs to change to a dict of user embeddings
-
-
-
                 all_user_genre_dict = [user_embeddings[u+1] for u in user_id]
 
-                user_list = [ model.user_embeddings.prepare_input(user_genre_dict, genre_list) for user_genre_dict in all_user_genre_dict]
+                user_list = [ module.user_embeddings.prepare_input(user_genre_dict, genre_list) for user_genre_dict in all_user_genre_dict]
                 user_tensor = torch.stack(user_list).to(args.device)
 
-                user_emb, pos_emb, neg_emb = model.forward(user_tensor, pos, neg)
+                pos =torch.from_numpy(pos).type(torch.LongTensor).to(args.device)
+                
+                neg = torch.from_numpy(neg).type(torch.LongTensor).to(args.device)
 
-                batch_loss = model.bpr_loss(user_emb, pos_emb, neg_emb)
+                user_emb, pos_emb, neg_emb = model.forward(user_tensor, pos, neg)
+            
+                batch_loss = module.bpr_loss(user_emb, pos_emb, neg_emb)
                 batch_loss = torch.mean(batch_loss)
 
                 optimizer.zero_grad()
@@ -155,10 +160,13 @@ def train_model(args):
 
             # Check Recall@20 on validation
             model.eval()
-            pred_list_val = generate_pred_list_attention(model, train_matrix,args,user_embeddings, topk=20, print_emb=True)
+            pred_list_val = generate_pred_list_attention(module, train_matrix,args,user_embeddings, topk=20, print_emb=True)
             recall_val = recall_at_k(actual_list_val, pred_list_val, 20)
+            ndcg_val = ndcg_k(actual_list_val, pred_list_val, 20)
+            
             if not args.debug:
                 wandb.log({'Validation Recall@20': recall_val}) 
+                wandb.log({'Validation NDCG@20': ndcg_val}) 
             
             print(f"Validation Recall@20: {recall_val}")
 
@@ -175,7 +183,7 @@ def train_model(args):
                 with open(f"saved_summary_embeddings/ml-100k/pred_list_val.pkl", "wb+") as f:
                     pickle.dump(pred_list_val, f)
                 torch.save(model.state_dict(), f"{args.model_save_name}_best_model.pth")
-                torch.save(model.user_embeddings.state_dict(), f"{args.model_save_name}_embedder.pth")
+                torch.save(module.user_embeddings.state_dict(), f"{args.model_save_name}_embedder.pth")
                 print(f'wrote model to {args.model_save_name}')
             else:
                 counter += 1
@@ -197,7 +205,7 @@ def train_model(args):
 
 
     # Test set results
-    pred_list_test = generate_pred_list_attention(model, train_matrix,args,user_embeddings, topk=args.topk)
+    pred_list_test = generate_pred_list_attention(module, train_matrix,args,user_embeddings, topk=args.topk)
     actual_list_test = actual_list_test  # Adjust based on your data format
     precision_test = precision_at_k(actual_list_test, pred_list_test, args.topk)
     recall_test = recall_at_k(actual_list_test, pred_list_test, args.topk)
@@ -207,11 +215,13 @@ def train_model(args):
     print(f"Test NDCG@{args.topk}: {ndcg_test}")
     
     log_data = {
-        'model_name_date_time_ran': f"{args.model_name}_{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        'model_name_date_time_ran': f"{args.model_log_name}",
         'args.topk': args.topk,
         'precision_test': precision_test,
         'recall_test': recall_test,
         'recall_val': recall_val,
+        'ndc_test': ndcg_test,
+        'ndcg_val':ndcg_val,
         'args.num_layers': args.num_layers,
         'args.lr': args.lr,
         'args.num_heads':args.num_heads,
@@ -221,12 +231,12 @@ def train_model(args):
        
 
     # Save pretrained embeddings
-    torch.save(model.user_embeddings.state_dict(), f"{args.model_save_name}_user_embeddings.pth")
-    torch.save(model.item_embeddings.weight.data, f"{args.model_save_name}_item_embeddings.pth")
+    torch.save(module.user_embeddings.state_dict(), f"{args.model_save_name}_user_embeddings.pth")
+    torch.save(module.item_embeddings.weight.data, f"{args.model_save_name}_item_embeddings.pth")
 
     
 
-    rankings_matrix = generate_rankings_for_all_users_attention(model, num_users=num_users, num_items=num_items,user_emb=user_embeddings,args=args)
+    rankings_matrix = generate_rankings_for_all_users_attention(module, num_users=num_users, num_items=num_items,user_emb=user_embeddings,args=args)
     np.save(f"{args.model_save_name}_rankings_matrix.npy", rankings_matrix)
     print("rankings_matrix:", rankings_matrix)
 
@@ -245,9 +255,19 @@ if __name__ == "__main__":
     load_dotenv(".env")
     args = parse_args()
     openai.api_key = os.getenv("OPEN-AI-SECRET")
-    
-    train_model(args)
-    
 
-    
+    start_time = time.time()
+
+    # Call the train_model function
+    train_model(args)
+
+    # Record end time
+    end_time = time.time()
+
+    # Calculate the elapsed time
+    elapsed_time = end_time - start_time
+
+    # Print the elapsed time
+    print(f"Elapsed Time: {elapsed_time} seconds")
+
     

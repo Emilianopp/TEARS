@@ -7,6 +7,8 @@ from torch.utils.data import Dataset, DataLoader
 from data.dataloader import get_dataloader
 from argparse import ArgumentParser
 import os
+import debugpy
+
 
 
 def parse_args():  # Parse command line arguments
@@ -22,6 +24,8 @@ def parse_args():  # Parse command line arguments
     # setting for summary generation
     parser.add_argument("--in_context", default=1, type=int)
     parser.add_argument("--only_title", default=0, type=int)
+    parser.add_argument('--debugger', action='store_true')
+    
 
     return parser.parse_args()
 
@@ -29,6 +33,11 @@ def parse_args():  # Parse command line arguments
 if __name__ == "__main__":
     print("Start time:", time.asctime())
     args = parse_args()
+    if args.debugger: 
+        debugpy.listen(5678)
+        print("Waiting for debugger attach")
+        debugpy.wait_for_client()
+
     start_time = time.time()
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu') )
     # device = torch.device('cpu')
@@ -45,7 +54,6 @@ if __name__ == "__main__":
     user_genre_dataloader = get_dataloader(user_genre_file, batch_size=args.batch_size, num_users=args.num_users, user_start=764, user_end=1000)
     num_of_batch = len(user_genre_dataloader)
     print("Num of batch:", num_of_batch)
-
     if args.mode == 'sum':
         user_summary_list = in_context_user_summary(global_path , built_context, args.model_name, device, args.data_name,
                                                     user_genre_dataloader, args.in_context, args.only_title)

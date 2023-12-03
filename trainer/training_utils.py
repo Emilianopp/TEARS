@@ -145,9 +145,6 @@ def generate_pred_list_attention(model, train_matrix,args,user_embeddings, topk=
        
         rating_pred =   model.predict(user_tensor,print_emb = print_emb)
 
-       
-
-
         rating_pred = rating_pred.cpu().data.numpy().copy()
         rating_pred[train_matrix[batch_user_index].toarray() > 0] = 0
 
@@ -448,12 +445,12 @@ def get_prompts(user_summaries,args,augmented):
                     Horror: Summary: A collection of horror films that explore vampires, psychological thrillers, and supernatural elements. A vampire gothic horror, a vampire black comedy, a psychological thriller, an action horror, a fantasy thriller, a direct-to-video horror, and a,\
                     War: Summary: A collection of war-inspired films from various genres, including action thrillers, historical dramas, biographical dramas, satirical comedies, and dramatic portrayals of real-life events.\
                     This is the resulting output summary: \
-                    Based on your movie preferences, you enjoy a variety of genres. You seem to enjoy dramas that tackle various themes such as romance, religion, comedy, feminism, and social issues. You also enjoy intense thrillers with elements of horror, mystery, crime, and cyberpunk. Adventure movies with thrilling escapades, mysterious secrets, and a touch of danger appeal to you as well. Additionally, you seem to be a fan of romance films from the 1990s that explore love, relationships, and personal growth. Comedies with various themes, including romantic comedy, road trips, screwball antics, and drag queens are also favorites of yours. Crime films with thrilling mysteries, engaging drama, and a touch of cybercrime catch your interest. Lastly, action-packed films from the 1990s with elements of crime, cyberpunk, and thrilling adventures also seem to be enjoyable for you."            },            {
+                    Based on your movie preferences, you enjoy a variety of genres. You seem to enjoy dramas that tackle various themes such as romance, religion, comedy, feminism, and social issues. You also enjoy intense thrillers with elements of horror, mystery, crime, and cyberpunk. Adventure movies with thrilling escapades, mysterious secrets, and a touch of danger appeal to you as well. Additionally, you seem to be a fan of romance films from the 1990s that explore love, relationships, and personal growth. Comedies with various themes, including romantic comedy, road trips, screwball antics, and drag queens are also favorites of yours. Crime films with thrilling mysteries, engaging drama, and a touch of cybercrime catch your interest. Lastly, action-packed films from the 1990s with elements of crime, cyberpunk, and thrilling adventures also seem to be enjoyable for you."},            
+              {
                 "role": "user",
                 "content": text[i]
             }
             ]
-
         try:
             prompts = openai.ChatCompletion.create(model="gpt-3.5-turbo",   
                                                 messages=msg,                                    
@@ -495,9 +492,10 @@ def get_encoder_inputs( user_summaries,args,prompt_dict=None,augmented =False):
     
 def get_t5_embeddings( prompts,args,model = None): 
 
-    model = SentenceTransformer('sentence-transformers/sentence-t5-large').to(args.device) if model is not None else model
+    
+    model = SentenceTransformer('sentence-transformers/sentence-t5-large').to(args.device) if model is None else model
 
-    embeddings = model.encode(prompts)
+    embeddings = model.encode(prompts,show_progress_bar =False)
 
     return torch.tensor(embeddings)
 
@@ -532,12 +530,18 @@ def get_genres():
     "Musical": 12,
     "Mystery": 13,
     "Romance": 14,
-    "Sci-Fi": 15,
+    "SciFi": 15,
     "Thriller": 16,
     "War": 17,
     "Western": 18
     }
-    return genre_dict
+    # Convert keys to lowercase
+    genre_dict_lower = {key.lower(): value for key, value in genre_dict.items()}
+
+    return genre_dict_lower
+
+
+
 
 
 def parse_args(notebook = False):  # Parse command line arguments
@@ -546,12 +550,11 @@ def parse_args(notebook = False):  # Parse command line arguments
     parser.add_argument("--log_file", default= 'model_logs/ml-100k/logging_llmMF.csv', type=str)
     parser.add_argument("--model_name", default='MFLLM', type=str)
     parser.add_argument("--emb_type", default='attn', type=str)
-    
-
     parser.add_argument("--summary_style", default='topM', type=str)
     parser.add_argument("--embedding_module", default='openai', type=str)
     parser.add_argument("--embedding_dim" , default=1536, type=int)
-    parser.add_argument("--output_emb" , default=64, type=int)
+    parser.add_argument("--bs" , default=4, type=int)
+    parser.add_argument("--output_emb" , default=256, type=int)
     parser.add_argument("--top_for_rerank" , default=50, type=int)
     parser.add_argument("--num_layers" , default=3, type=int)
     parser.add_argument("--num_layers_transformer" , default=3, type=int)
@@ -567,13 +570,16 @@ def parse_args(notebook = False):  # Parse command line arguments
     parser.add_argument("--wd", default=0, type=float)
     parser.add_argument('--make_embeddings', action='store_true')
     parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--debugger', action='store_true')
     parser.add_argument('--cosine', action='store_true')
     parser.add_argument('--make_augmented', action='store_true')
+    parser.add_argument("--max_steps", type=int, default=5)
 
     args = parser.parse_args() if not notebook else parser.parse_args(args=[])
     args.recon = False
     args.device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu') )
-    args.model_save_path = f'./saved_model/ml-100k/{args.model_name}'
-    args.model_save_name = f"{args.model_save_path}_best_model_{args.lr}_{args.epochs}_{args.num_heads}_{args.cosine}_{args.num_layers}.pth"
+    args.model_save_path = f'/home/mila/e/emiliano.penaloza/scratch/saved_model/ml-100k/{args.model_name}'
+    args.model_save_name = f"{args.model_save_path}_best_model_{args.lr}_{args.output_emb}_{args.num_heads}_{args.cosine}_{args.num_layers}.pth"
 
+    args.model_log_name = f'{args.model_name}_{args.lr}_{args.output_emb}_{args.num_heads}_{args.cosine}_{args.num_layers}'
     return args

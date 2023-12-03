@@ -18,8 +18,8 @@ def build_context(global_path):
     # Prepare a dictionary with asin as key and movie details as value
     movie_dict = merged_df.set_index('asin')[['title', 'genres', 'summary']].to_dict(orient='index')
     # Load the reddit data
-    with open(f'{global_path}/data/reddit.json') as f:
-        reddit_data = json.load(f)
+    # with open(f'{global_path}/data/reddit.json') as f:
+    #     reddit_data = json.load(f)
 
     # pre-process data
     if os.path.exists(
@@ -33,6 +33,9 @@ def build_context(global_path):
         with open(f'{global_path}/data/built_context.json', 'r') as file:
             built_context = json.load(file)
     else:
+        with open(f'{global_path}/data/reddit.json') as f:
+            reddit_data = json.load(f)
+
         built_context = retrieve_data_reddit(reddit_data, movie_dict)
         # Open the file in write mode
         with open(f'{global_path}/data/built_context.json', 'w') as json_file:

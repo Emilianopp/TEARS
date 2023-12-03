@@ -9,7 +9,7 @@ import time
 def init_weights(m):
     if isinstance(m, nn.Linear):
         torch.nn.init.xavier_uniform(m.weight)
-        m.bias.data.fill_(0.01)
+        # m.bias.data.fill_(0.01)
         
 class MatrixFactorization(nn.Module):
     def __init__(self, num_users, num_items, args):
@@ -40,7 +40,7 @@ class MatrixFactorization(nn.Module):
 
         return bpr_loss
 
-    def forward(self, user, pos, neg):
+    def forward(self, user_id, pos_id, neg_id):
         # thr: threshold
 
         user_id = torch.from_numpy(user).type(torch.LongTensor).to(self.device)
@@ -49,6 +49,7 @@ class MatrixFactorization(nn.Module):
 
         user_emb, pos_emb, neg_emb = \
             self.user_embeddings(user_id), self.item_embeddings(pos_id), self.item_embeddings(neg_id)
+        print(f"{pos_emb.shape=}")
 
         return user_emb, pos_emb, neg_emb
 
@@ -106,15 +107,15 @@ class MatrixFactorizationLLM(nn.Module):
 
         return bpr_loss
 
-    def forward(self, user, pos, neg):
+    def forward(self, user_id, pos_id, neg_id):
         # thr: threshold
 
         # user_id = torch.from_numpy(user).type(torch.LongTensor).to(self.device)
-        pos_id = torch.from_numpy(pos).type(torch.LongTensor).to(self.device)
-        neg_id = torch.from_numpy(neg).type(torch.LongTensor).to(self.device)
+        # pos_id = torch.from_numpy(pos).type(torch.LongTensor).to(self.device)
+        # neg_id = torch.from_numpy(neg).type(torch.LongTensor).to(self.device)
 
         user_emb ,pos_emb, neg_emb = \
-            self.user_embeddings(user),self.item_embeddings(pos_id), self.item_embeddings(neg_id)
+            self.user_embeddings(user_id),self.item_embeddings(pos_id), self.item_embeddings(neg_id)
 
 
         return  user_emb, pos_emb, neg_emb
@@ -123,11 +124,12 @@ class MatrixFactorizationLLM(nn.Module):
     def get_user_embeddings():
         pass
     def predict(self, user_emb,print_emb = False):
-        print('hi')
+
         user_emb = self.user_embeddings(user_emb)
 
 
         pred = user_emb @ self.item_embeddings.weight.t()
+
 
 
         return pred

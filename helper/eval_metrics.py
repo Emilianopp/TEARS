@@ -40,6 +40,7 @@ def recall_at_k_one(actual, predicted, topk):
     true_users = 0
 
     act_set = set(actual)
+   
     pred_set = set(predicted[:topk])
     if len(act_set) != 0:
         sum_recall += len(act_set & pred_set) / float(len(act_set))

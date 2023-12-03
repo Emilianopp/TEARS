@@ -165,7 +165,7 @@ def generate_text_openai(prompts, model_name, device):
         return messages_contents
 
 
-def save_to_file(global_path,user_summary_dict, global_path, data_name, model_name, in_context, only_title):
+def save_to_file(global_path,user_summary_dict, data_name, model_name, in_context, only_title):
     save_path = f'{global_path}/saved_user_summary/{data_name}/user_summary_{model_name}_in{in_context}_title{only_title}.json'
 
     # Load existing data from file

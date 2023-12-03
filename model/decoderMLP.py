@@ -4,7 +4,7 @@ import torch.nn as nn
 
 
 class decoderMLP(nn.Module):
-    def __init__(self, input_dim, num_layers, output_dim, dropout=0.25):
+    def __init__(self, input_dim, num_layers, output_dim, dropout=0.25,bias = False ):
         super(decoderMLP, self).__init__()
 
         # Calculate the reduction factor to evenly decrease dimensionality
@@ -16,25 +16,26 @@ class decoderMLP(nn.Module):
         layers = []
         
         # Input layer
-        layers.append(nn.Linear(input_dim, input_dim - reduction_factor))
-        layers.append(nn.ReLU())  # You can choose a different activation function if needed
+        layers.append(nn.Linear(input_dim, input_dim - reduction_factor, bias=bias))
+        layers.append(nn.ReLU())
         layers.append(nn.Dropout(dropout))
-        
+
         # Hidden layers with residual connections
         for _ in range(num_layers - 2):  # Subtract 2 for the input and output layers
-            residual = nn.Linear(input_dim - reduction_factor, input_dim - 2 * reduction_factor)
+            residual = nn.Linear(input_dim - reduction_factor, input_dim - 2 * reduction_factor, bias=bias)
             layers.append(residual)
-            layers.append(nn.ReLU())  # You can choose a different activation function if needed
+            layers.append(nn.ReLU())
             layers.append(nn.Dropout(dropout))
             layers.append(nn.Identity())  # Identity mapping for residual connection
             input_dim -= reduction_factor
-        
+
         # Output layer
-        layers.append(nn.Linear(input_dim - reduction_factor, output_dim))
+        layers.append(nn.Linear(input_dim - reduction_factor, output_dim, bias=bias))
         layers.append(nn.Dropout(dropout))
-        
+
         # Define the MLP as a Sequential model
         self.mlp = nn.Sequential(*layers)
+        
     def forward(self, x):
 
     
@@ -44,19 +45,21 @@ class decoderMLP(nn.Module):
         return torch.mean(torch.mean((pred - target)**2, dim=0))
     
 class decoderAttention(nn.Module):
-    def __init__(self,attention_dim,num_heads,num_layers_mlp,output_emb_mlp,num_layers = 2 ,dropout=0.25):
+    def __init__(self,attention_dim,num_heads,num_layers_mlp,output_emb_mlp,num_layers = 2 ,dropout=0.25,bias = False):
        
         super(decoderAttention, self).__init__()
 
-        self.attnModule = nn.MultiheadAttention(attention_dim, num_heads, dropout=dropout,batch_first= True)
+        self.attnModule = nn.MultiheadAttention(attention_dim, num_heads, dropout=dropout,batch_first= True,bias = bias)
         
-        self.mlp_shrinker = decoderMLP(attention_dim,num_layers_mlp,output_emb_mlp) 
+        self.mlp_shrinker = decoderMLP(attention_dim,num_layers_mlp,output_emb_mlp,bias = bias ) 
         self.embedding_dim = attention_dim 
         
         
     def forward(self, x):
 
+        
         h,_= self.attnModule(x,x,x)
+  
 
         h = h.mean(axis = 1 )
         
@@ -68,10 +71,14 @@ class decoderAttention(nn.Module):
     def prepare_input(self,genre_dict, genres_list):
         # List to store genre embeddings
         genre_embeddings = []
+        genre_dict = {k.lower().replace('sci-fi','scifi'):v for k,v in genre_dict.items()}
 
+   
         for genre in genres_list:
             if genre in genre_dict:
-                genre_embeddings.append(genre_dict[genre])
+
+             
+                genre_embeddings.append(genre_dict[genre.lower()])
             else:
                 # If the genre is missing, pad it with zeros
                 genre_embeddings.append(torch.zeros( self.embedding_dim))
@@ -88,13 +95,14 @@ class decoderAttention(nn.Module):
     
 
 class movieTransformer(nn.Module):
-    def __init__(self,attention_dim,num_heads,num_layers_mlp,output_emb_mlp,num_layers = 2 ,dropout=0.25):
+    def __init__(self,attention_dim,num_heads,num_layers_mlp,output_emb_mlp,num_layers = 2 ,dropout=0.25,bias = False):
        
         super(movieTransformer, self).__init__()
         
         #make a loop to make transformer layers
 
         self.nn_list= nn.ModuleList()
+        
 
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=attention_dim, nhead=num_heads, dim_feedforward=attention_dim, dropout=dropout, activation='relu')
         self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
@@ -118,7 +126,8 @@ class movieTransformer(nn.Module):
 
         for genre in genres_list:
             if genre in genre_dict:
-                genre_embeddings.append(genre_dict[genre])
+                print(f"{genre=}")
+                genre_embeddings.append(genre_dict[genre.lower()])
             else:
                 # If the genre is missing, pad it with zeros
                 genre_embeddings.append(torch.zeros( self.embedding_dim))
