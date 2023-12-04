@@ -105,8 +105,11 @@ def generate_train_val_test_splits(ratings, k, movie_metadata):
         # Extract user's ratings
         user_ratings = ratings[ratings['userId'] == user_id]
         user_movies = user_ratings.merge(movie_metadata, left_on='movieId', right_on='movielens_id')
-        user_movies = user_movies.dropna(subset=['summary'])  # Remove movies with 'NaN' summary
+        # user_movies = user_movies.dropna(subset=['summary'])  # Remove movies with 'NaN' summary
         user_movies = user_movies[user_movies['title'].isin(valid_movie_titles)]
+        movie_set = set(user_movies['movieId'])
+
+
         if len(user_movies) <= 3:
             non_users.append(user_id)
             continue
@@ -129,6 +132,7 @@ def generate_train_val_test_splits(ratings, k, movie_metadata):
     train_data = pd.concat(train_data)
     val_data = pd.concat(val_data)
     test_data = pd.concat(test_data)
+
     return train_data, val_data, test_data,non_users
 
 
@@ -155,6 +159,7 @@ if __name__ == "__main__":
 
     ratings = pd.read_csv(ratings_file, sep=separator, header=header, encoding='ISO-8859-1')
     ratings.columns = ['userId', 'movieId', 'rating', 'timestamp']
+   
 
     # Load movie metadata
     movie_metadata = pd.read_csv('../data/merged_asin_movielens_summary.csv')
@@ -197,6 +202,11 @@ if __name__ == "__main__":
     train_data.to_csv(f'../data_preprocessed/{data_name}/train_leave_one_out_{("timestamped" if args.timestamp else "")}.csv', index=False)
     val_data.to_csv(f'../data_preprocessed/{data_name}/validation_leave_one_out_{"timestamped" if args.timestamp else ""}.csv',index=False)
     test_data.to_csv(f'../data_preprocessed/{data_name}/test_leave_one_out_{"timestamped" if args.timestamp else ""}.csv', index=False)
+
+    movie_set = set(train_data['movieId']) 
+    max_movie_id = max(movie_set)
+
+
 
     # Print a message
     print("data saved to CSVs to data_preprocessed folder")

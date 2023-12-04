@@ -7,11 +7,11 @@ cc/
 .env
 wandb/
 *.pyc
-saved_LLM/
-saved_model/*
+saved_LLM/*
+saved_model/ml-100k/*
 # Ignore all files and folders
 
-
+notebooks/*
 # Except .py files
 !*.py
 

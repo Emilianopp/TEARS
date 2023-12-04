@@ -22,6 +22,7 @@ def precision_at_k(actual, predicted, topk):
 
 
 def recall_at_k(actual, predicted, topk):
+
     sum_recall = 0.0
     num_users = len(predicted)
     true_users = 0
@@ -121,7 +122,9 @@ def mapk(actual, predicted, k=10):
 
 def ndcg_k(actual, predicted, topk):
     res = 0
-    for user_id in range(len(actual)):
+    num_users = len(predicted)
+    for user_id in range(num_users):
+
         k = min(topk, len(actual[user_id]))
         idcg = idcg_k(k)
         dcg_k = sum([int(predicted[user_id][j] in set(actual[user_id])) / math.log(j + 2, 2) for j in range(topk)])
