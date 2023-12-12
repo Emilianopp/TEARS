@@ -33,7 +33,7 @@ global_path = '/home/mila/e/emiliano.penaloza/LLM4REC'
 load_dotenv()
 key = os.getenv("OPEN-AI-SECRET")
 parser = ArgumentParser(description="Your script description here")
-parser.add_argument("--train_data", default="../data_preprocessed/ml-100k/train_leave_one_out_timestamped.csv", help="Path to the training data CSV file")
+parser.add_argument("--train_data", default="../data_preprocessed/ml-1m/prompt_set_timestamped.csv", help="Path to the training data CSV file")
 parser.add_argument("--gpt_version", default="gpt-4-1106-preview", help="GPT model version")
 parser.add_argument("--max_tokens", type=int, default=300, help="Maximum number of tokens for the response")
 parser.add_argument("--debug", action='store_true', help="Whether to run in debug mode")
@@ -41,6 +41,15 @@ args = parser.parse_args()
 
  
 openai.api_key = key
+
+
+
+def load_existing_data(file_path):
+    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+        with open(file_path, 'r') as fp:
+            existing_data = json.load(fp)
+        return existing_data
+    return {}
 
 
 def generate_prompts_recent(train_data,only_title=1,num_movies = 30): 
@@ -73,7 +82,7 @@ def generate_prompts_recent(train_data,only_title=1,num_movies = 30):
                 prompt += f"\n{title}: {description}"
                 
             prompt += f'\nRating: {rating}\n'
-            prompt += f'\Genres: {rating}\n'
+            prompt += f'\Genres: {genres}\n'
         prompts[id] = prompt    
     return prompts
 
@@ -83,60 +92,59 @@ def generate_prompts_recent(train_data,only_title=1,num_movies = 30):
 
 if __name__ == "__main__":
     data = pd.read_csv(args.train_data)
-    
 
-    prompt = f"Task: You will now help me generate a simply worded highly detailed summary of the following genre summaries\n"
-    prompt += "Instructions: Always start with 'Summary:'. Please be constrain the length within 200 tokens for the summary by being concise and not including irrelevant details.\n"
-    prompt += "The format of the summary should be:\n"
-    prompt += "Summary: {Specific details about genres the user enjoys}. {Specific details of plot points the user seemns to enjoy}.  {Specific details about genres the user does not enjoy}. {Specific details of plot points the user does not enjoy}."
-    prompt += "The following is an example of a generated summary"
-    prompt += """Summary: The user enjoys action, crime, thriller, adventure, and comedy films, with preference for high-stakes confrontations, complex schemes, suspense, humorous moments, and films set in advanced technology scenarios or future settings. However, they do not like war films, historical dramas, movies with slow-paced narratives, heavy dialogue, films set in surrealistic settings or involve anthropomorphic characters, and films that heavily rely on abstract concepts and complexity. Films exploring intense dramatic scenes or serious existential themes are also less appealing."""    
-    
-    prompt = f"Task: You will now help me generate a highly detailed summary based on the broad common elements of movies.\n"
-    prompt += f"Do not comment on the year of production. Do not mention any specific movie titles.\n"
+    prompt = "Task: You will now help me generate a highly detailed summary based on the broad common elements of movies.\n"
+    prompt += "Do not comment on the year of production. Do not mention any specific movie titles.\n"
     prompt += 'Do not comment on the ratings but use qualitative speech such as the user likes, or the user does not enjoy\n'
-    prompt += 'Remember you are an expert crafter of these summaries so any other exper should be able to craft a similar summary to yours given this task\n'
+    prompt += 'Remember you are an expert crafter of these summaries so any other expert should be able to craft a similar summary to yours given this task\n'
     prompt += "Keep the summary short at about 200 words. The summary should have the following format:\n"
-    prompt += "Summary: {Specific details about genres the user enjoys}. {Specific details of plot points the user seemns to enjoy}.  {Specific details about genres the user does not enjoy}. {Specific details of plot points the user does not enjoy but other users may}."
+    prompt += "Summary: {Specific details about genres the user enjoys}. {Specific details of plot points the user seems to enjoy}. \
+        {Specific details about genres the user does not enjoy}. {Specific details of plot points the user does not enjoy but other users may}."
     # prompt += " The following is an example:\n"
     # prompt += demo_str  # add demonstration
 
-    prompts = generate_prompts_recent(data, 1,30)
-    
+    prompts = generate_prompts_recent(data, 1,50)
+        
+    existing_data = load_existing_data(f'../saved_user_summary/ml-100k/user_summary_gpt4_{"debug" if args.debug else ""}.json')
+    #make existing data keys back into ints 
+    existing_data = {float(k):v for k,v in existing_data.items()}
 
-    return_dict = {}
-    for i,(idx,user_prompt) in enumerate(prompts.items()):
-            msg = [
-                {
-                    "role": "system",
-                    "content": prompt
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt
-                }
-            ]
+    prompts_to_process = {idx: user_prompt for idx, user_prompt in prompts.items() if float(idx) not in existing_data}
+   
+    return_dict = existing_data
 
+    for i, (idx, user_prompt) in (pbar := tqdm(enumerate(prompts_to_process.items()))):
+        msg = [
+            {
+                "role": "system",
+                "content": prompt
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ]
 
-            while True:
-                try:
-                    return_dict[float(idx)] = openai.ChatCompletion.create(
-                        model=args.gpt_version,
-                        messages=msg,
-                        max_tokens=args.max_tokens
-                    )['choices'][0]['message']['content']
+        while True:
+            try:
+                return_dict[float(idx)] = openai.ChatCompletion.create(
+                    model=args.gpt_version,
+                    messages=msg,
+                    max_tokens=args.max_tokens
+                )['choices'][0]['message']['content']
 
-                    # If the request is successful, break out of the loop
-                    break
-                except Exception as e:
-                    print(f"An error occurred: {e}")
-                    print("Retrying in 30 seconds...")
-                    time.sleep(30)
-            if args.debug and i == 5:
-                    break 
+                # If the request is successful, break out of the loop
+                break
+            except Exception as e:
+                pbar.set_description(f"An error occurred: {e} ,Retrying in 30 seconds...")
+                time.sleep(60*3)
 
-    #save out dict as a json
-    with open(f'../saved_user_summary/ml-100k/user_summary_gpt4_{"debug" if args.debug else ""}.json', 'w') as fp:
+        if args.debug and i == 5:
+            break
 
-        print(f"{return_dict=}")
-        json.dump(return_dict, fp, indent=4)
+        # Save updated dict as a JSON file
+        pbar.set_description(f"Saving user {idx} summary...")
+        with open(f'../saved_user_summary/ml-100k/user_summary_gpt4_{"debug" if args.debug else ""}.json', 'w') as fp:
+
+            json.dump(return_dict, fp, indent=4)
+
