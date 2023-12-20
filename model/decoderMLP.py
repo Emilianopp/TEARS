@@ -50,11 +50,8 @@ class decoderAttention(nn.Module):
         super(decoderAttention, self).__init__()
 
         self.attnModule = nn.MultiheadAttention(attention_dim, num_heads, dropout=dropout,batch_first= True,bias = bias)
-        
         self.mlp_shrinker = decoderMLP(attention_dim,num_layers_mlp,output_emb_mlp,bias = bias ) 
         self.embedding_dim = attention_dim 
-        
-        
     def forward(self, x):
 
         

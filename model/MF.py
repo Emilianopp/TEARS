@@ -5,7 +5,8 @@ import numpy as np
 from scipy import spatial
 from .decoderMLP import decoderMLP
 import time
-
+#import SentenceTransformer
+from sentence_transformers import SentenceTransformer
 def init_weights(m):
     if isinstance(m, nn.Linear):
         torch.nn.init.xavier_uniform(m.weight)
@@ -142,3 +143,16 @@ class MatrixFactorizationLLM(nn.Module):
             return self.item_embeddings[ids]
         else:
             return None
+
+class sentenceT5Classification(nn.Module):
+    def __init__(self, sent_t5,num_items, args):
+        super(sentenceT5Classification, self).__init__()
+        
+        self.sentece_trans = sent_t5
+        mlp_in_dim = self.sentece_trans.get_sentence_embedding_dimension()
+        #add a 3 layer mlp with relu activation and dropout and bias = to bias that outputs to num_items 
+        self.classification_head = decoderMLP(mlp_in_dim,3,num_items,bias = not args.no_bias)
+    def forward(self,x,mask):
+        h = self.sentece_trans.encode(x)
+        h = self.classification_head(h)
+        return h
