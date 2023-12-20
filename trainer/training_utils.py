@@ -566,20 +566,30 @@ def parse_args(notebook = False):  # Parse command line arguments
     parser.add_argument("--train", default=True, type=bool)
     parser.add_argument("--num_neg", default=1, type=int)
     parser.add_argument("--num_heads", default=4, type=int)
-    parser.add_argument("--lr", default=.0001, type=float)
+    parser.add_argument("--lr", default=.01, type=float)
     parser.add_argument("--wd", default=0, type=float)
     parser.add_argument('--make_embeddings', action='store_true')
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--debugger', action='store_true')
     parser.add_argument('--cosine', action='store_true')
     parser.add_argument('--make_augmented', action='store_true')
+    parser.add_argument('--no_bias', action='store_true')
     parser.add_argument("--max_steps", type=int, default=5)
 
     args = parser.parse_args() if not notebook else parser.parse_args(args=[])
     args.recon = False
     args.device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu') )
     args.model_save_path = f'/home/mila/e/emiliano.penaloza/scratch/saved_model/ml-100k/{args.model_name}'
-    args.model_save_name = f"{args.model_save_path}_best_model_{args.lr}_{args.output_emb}_{args.num_heads}_{args.cosine}_{args.num_layers}.pth"
+    args.model_save_name = f"{args.model_save_path}_best_model_{args.lr}_{args.output_emb}_{args.num_heads}_{args.cosine}_{args.num_layers}_bias_{args.no_bias}.pth"
 
-    args.model_log_name = f'{args.model_name}_{args.lr}_{args.output_emb}_{args.num_heads}_{args.cosine}_{args.num_layers}'
+    args.model_log_name = f'{args.model_name}_{args.lr}_{args.output_emb}_{args.num_heads}_{args.cosine}_{args.num_layers}_bias_{args.no_bias}'
+    
+    directory_path = "../scratch"
+
+    if os.path.exists(directory_path) and os.path.isdir(directory_path):
+        print(f"The directory '{directory_path}' exists. Will save all weights and models there")
+        args.scratch = '../scratch'
+        
+    else:
+        args.scratch = '.'
     return args
