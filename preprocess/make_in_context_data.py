@@ -94,7 +94,7 @@ if __name__ == "__main__":
     data = pd.read_csv(args.train_data)
 
     prompt = "Task: You will now help me generate a highly detailed summary based on the broad common elements of movies.\n"
-    prompt += "Do not comment on the year of production. Do not mention any specific movie titles.\n"
+    prompt += "Do not comment on the year of production. Do not mention any specific movie titles or actors.\n"
     prompt += 'Do not comment on the ratings but use qualitative speech such as the user likes, or the user does not enjoy\n'
     prompt += 'Remember you are an expert crafter of these summaries so any other expert should be able to craft a similar summary to yours given this task\n'
     prompt += "Keep the summary short at about 200 words. The summary should have the following format:\n"
