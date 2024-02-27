@@ -16,4 +16,3 @@ notebooks/*
 !*.py
 
 *.pth
-*.json

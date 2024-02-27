@@ -3,9 +3,6 @@ import json
 import random
 import os
 from collections import OrderedDict
-import  debugpy
-#import display 
-from IPython.display import display
 import argparse 
 #silence warnings
 import warnings
@@ -102,8 +99,6 @@ def split_and_filter_ratings(user_movies, rating_threshold=4):
         #use the rest for train and prompt set
         training_set = prompt_movies= user_movies.drop(validation_test_movies.index)
 
-        
-
     else:
         candidate_recent_movies = user_movies.head(52)
         validation_test_movies = candidate_recent_movies[candidate_recent_movies['rating'] >= rating_threshold].tail(2)
@@ -147,7 +142,7 @@ def generate_train_val_test_splits(ratings, k, movie_metadata):
 
 
         # Randomly choose one movie for validation and remove it from user's ratings
-        prompt_movies,validation_movie, test_movie,training_set  = sample_random(user_movies) if not args.timestamp else split_and_filter_ratings(user_movies)
+        prompt_movies,validation_movie, test_movie,training_set  =split_and_filter_ratings(user_movies)
         if prompt_movies is None:
             non_users.append(user_id)
             continue
@@ -241,7 +236,8 @@ if __name__ == "__main__":
     random.seed(42)
     user_set = set(train_data['userId']) | set(val_data['userId']) | set(test_data['userId'])
     user_set = random.sample(list(user_set) ,500)
-    strong_generalization_set = pd.concat([train_data[train_data['userId'].isin(user_set)],val_data[val_data['userId'].isin(user_set)],val_data['userId'].isin(user_set)])
+    strong_generalization_set = pd.concat([train_data[train_data['userId'].isin(user_set)],val_data[val_data['userId'].isin(user_set)],test_data[test_data['userId'].isin(user_set)]])
+
     train_data = train_data[~train_data['userId'].isin(user_set)]
     val_data = val_data[~val_data['userId'].isin(user_set)]
     test_data = test_data[~test_data['userId'].isin(user_set)]
