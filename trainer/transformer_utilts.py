@@ -10,7 +10,7 @@ import pandas as pd
 from collections import defaultdict
 from helper.eval_metrics import Recall_at_k_batch,NDCG_binary_at_k_batch,MRR_at_k
 import wandb
-from helper.dataloader import DataMatrix
+from helper.dataloader import DataMatrix,MatrixDataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 import sys 
@@ -24,7 +24,7 @@ import pickle
 def load_data(args,tokenizer= None, rank=0,world_size=1):
     data_path = f'./data_preprocessed/{args.data_name}/'
     
-    loader = data.DataLoader(data_path)
+    loader = MatrixDataLoader(data_path)
     
     train_data = loader.load_data('train')
     vad_data_tr, valid_data = loader.load_data('validation')

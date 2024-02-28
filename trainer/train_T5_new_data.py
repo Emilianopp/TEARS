@@ -71,9 +71,8 @@ def train_fun(rank,world_size):
     tokenizer = T5Tokenizer.from_pretrained('t5-large')
     prompts,rec_dataloader,num_movies,val_dataloader,test_dataloader,val_data_tr,test_data_tr= load_data(args,tokenizer,rank,world_size)
     model_name = f"{args.embedding_module}-large"
-    if args.embedding_module == 't5_AE':
-        model =  T5MappingVAE.from_pretrained('t5-large', num_labels=num_movies)
-    elif args.embedding_module == 't5_classification':
+    
+    if args.embedding_module == 't5_classification':
         model = sentenceT5Classification.from_pretrained('t5-large', num_labels=num_movies, classifier_dropout = args.dropout)
         lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
                                 target_modules=["q", "v"],

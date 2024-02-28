@@ -197,7 +197,7 @@ if __name__ == "__main__":
     movie_metadata = pd.read_csv('../data/merged_asin_movielens_summary.csv')
 
     
-    k = 10  # threshold for history length
+    k = 20  # threshold for history length
 
     train_data, val_data, test_data,promp_set,non_users = generate_train_val_test_splits(ratings, k, movie_metadata)
 
@@ -246,7 +246,7 @@ if __name__ == "__main__":
     train_data.to_csv(f'../data_preprocessed/{data_name}/train_leave_one_out_{("timestamped" if args.timestamp else "")}.csv', index=False)
     val_data.to_csv(f'../data_preprocessed/{data_name}/validation_leave_one_out_{"timestamped" if args.timestamp else ""}.csv',index=False)
     test_data.to_csv(f'../data_preprocessed/{data_name}/test_leave_one_out_{"timestamped" if args.timestamp else ""}.csv', index=False)
-    promp_set.to_csv(f'../data_preprocessed/{data_name}/prompt_set_{"timestamped" if args.timestamp else ""}.csv', index=False)
+    promp_set.to_csv(f'../data_preprocessed/{data_name}/prompt_set_new{"timestamped" if args.timestamp else ""}.csv', index=False)
     strong_generalization_set.to_csv(f'../data_preprocessed/{data_name}/strong_generalization_set_{"timestamped" if args.timestamp else ""}.csv', index=False)
     movie_set = set(train_data['movieId']) 
     max_movie_id = max(movie_set)

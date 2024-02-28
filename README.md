@@ -9,3 +9,12 @@ When testing the model to see if it predicts all items correctly remember the mo
 
 ## Ideas for 
 Should consider where to go next. This is a baseline interpretation but how can you make this more autonomous a better agent for discory. Probably going to have to take a more conversational approach like the one olivier was suggesting
+
+
+## Experiments 
+
+To run aany experiment simply run 
+
+```
+pythom -m  experiment.FILE
+```

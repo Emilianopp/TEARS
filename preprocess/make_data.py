@@ -148,7 +148,7 @@ def get_count(tp, id):
 
 
 
-def filter_triplets(tp, min_uc=5, min_sc=0):
+def filter_triplets(tp, min_uc=0, min_sc=0):
     if min_sc > 0:
         itemcount = get_count(tp, 'movieId')
         tp = tp[tp['movieId'].isin(itemcount.index[itemcount['size'] >= min_sc])]
