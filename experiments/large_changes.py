@@ -65,7 +65,9 @@ with open('./data_preprocessed/ml-1m/show2id.pkl','rb') as f:
 
 movie_id_to_title = map_id_to_title('./data/ml-1m/movies.dat')
 movie_id_to_genre = map_id_to_genre('./data/ml-1m/movies.dat')
-
+movie_title_to_genre = {movie_title: movie_id_to_genre[movie_id] for movie_id, movie_title in movie_id_to_title.items()}
+for movie_id, genres in movie_title_to_genre.items():
+    movie_title_to_genre[movie_id] = genres.split('|')
 
 #easy tokenization function 
 def tokenize_prompt(tokenizer,prompt,max_l):
@@ -73,8 +75,17 @@ def tokenize_prompt(tokenizer,prompt,max_l):
                           return_tensors='pt')
     return encodings
 
+
+def genrewise_ndcg(genre_movies, genre, min_k=0, max_k=None):
+    relevance = [1 if genre in g   else 0 for g in genre_movies[min_k:max_k]]
+    dcg = sum(rel / np.log2(i + 2) for i, rel in enumerate(relevance))
+    idcg = sum(1 / np.log2(i + 2) for i in range(len(relevance)))
+    ndcg = dcg / idcg if idcg > 0 else 0
+    
+    return ndcg
+
 # gets diffs in recommendations between two summaries
-def get_difs(s1,s2,device = 0,target_rank = 10 ):
+def get_difs(s1,s2,device = 0,genre = 'Action' ,max_k = 20 ):
 
     s_1_encodings = tokenize_prompt(tokenizer,s1,max_l)
     s_2_encodings = tokenize_prompt(tokenizer,s2,max_l)
@@ -95,25 +106,20 @@ def get_difs(s1,s2,device = 0,target_rank = 10 ):
     ndcg_1 = genrewise_ndcg(genre_movies_1,genre,min_k = 0,max_k = max_k)
     ndcg_2 = genrewise_ndcg(genre_movies_2,genre,min_k = 0,max_k = max_k)
     delta = ndcg_1 - ndcg_2    
-    average_rankings1 = genrewise_average_rankings(genre_movies_1,genre,topk= 50)
-    average_rankings2 = genrewise_average_rankings(genre_movies_2,genre,topk = 50)
+
     rankings1 = [(movie_title,genre) for movie_title,genre in zip(movie_titles_1,genre_movies_1)]
     rankings2 = [(movie_title,genre) for movie_title,genre in zip(movie_titles_2,genre_movies_2)]
-    delta_rankings = average_rankings1 - average_rankings2
-    
 
-    return delta,delta_rankings,rankings1,rankings2
+
+
+    return delta,rankings1,rankings2
 
 counts = Counter(sum([v.split("|") for v in movie_id_to_genre.values()],[]))
 #keep counts if above 200 
 counts = {k:v for k,v in counts.items() if v > 200}
 genre_set = list(counts.keys())
 genre_set = ', '.join(genre_set)
-print(f"{genre_set=}")
-
-#sample 10 users from the prompt set 
 k_list= list(prompts.keys())
-random.seed(2024)
 k_sample = random.sample(k_list,500)
 
 
@@ -163,14 +169,14 @@ for k in (pbar:=tqdm(k_sample)):
                     model='gpt-4-1106-preview',
                     messages=msg,
                     max_tokens=300,
-                    temperature=0.0000001,
+                    temperature=0.001,
                     seed=2024,
                 )['choices'][0]['message']['content']
     lines = genres.split('\n')
     favorite_genre = lines[0].split(': ')[1]
     logging.info(f"{favorite_genre=}")
     least_favorite_genre = lines[1].split(': ')[1]
-    loggin.info(f"{least_favorite_genre=}")
+    logging.info(f"{least_favorite_genre=}")
     
     msg = [
                 {
@@ -199,10 +205,8 @@ for k in (pbar:=tqdm(k_sample)):
                 )['choices'][0]['message']['content']
 
 
-    delta_down,delta_rankings_down,rankings1_down,rankings2_down = print_difs(s,gpt_output,device = rank,genre = favorite_genre)
-
-    delta_up,delta_rankings_up,rankings1_up,rankings2_up = print_difs(s,gpt_output,device = rank,genre = least_favorite_genre)
-    
+    delta_down,rankings1_down,rankings2_down = get_difs(s,gpt_output,genre = favorite_genre)
+    delta_up,rankings1_up,rankings2_up = get_difs(s,gpt_output,genre = least_favorite_genre)
     move_down_genres.append(favorite_genre)
     move_up_genres.append(least_favorite_genre)
     outputs.append(gpt_output)  
@@ -210,26 +214,22 @@ for k in (pbar:=tqdm(k_sample)):
     deltas_ndcg_down.append(delta_down)
     deltas_ndcg_up.append(delta_up)
 
-    pbar.set_description(f"average ndcgs up {-np.mean(deltas_ndcg_up)} average ndcg down {np.mean(deltas_ndcg_down)}")    
     
-    # pbar.set_description(f"delta_down: {-delta_average_rankings_down},average delta down {np.mean(deltas_ndcg)}, average_medians_up {np.mean([x[1] for x in moved_up])}, average_medians_down {np.mean([-x[1] for x in moved_down])}")    
-    
-    
+    pbar.set_description(f"average ndcgs up {np.mean(deltas_ndcg_up)} average ndcg down {np.mean(deltas_ndcg_down)}")    
+    logging.info(f"average ndcgs up {np.mean(deltas_ndcg_up)} average ndcg down {np.mean(deltas_ndcg_down)}")
     
 
-#make a dataframe for the dicts 
-blue_scores_df = pd.DataFrame.from_dict(bleu_scores,orient = 'index')
-gpt_outputs_df = pd.DataFrame.from_dict(gpt_outputs_d,orient = 'index')
-original_rankings_df = pd.DataFrame.from_dict(original_rankings,orient = 'index')
-changed_rankings_df = pd.DataFrame.from_dict(changed_rankings,orient = 'index')
-deltas_df = pd.DataFrame.from_dict(deltas,orient = 'index')
-original_prompts_df = pd.DataFrame.from_dict(original_prompts,orient = 'index')
+data = {
+    'move_down_genres': move_down_genres,
+    'move_up_genres': move_up_genres,
+    'outputs': outputs,
+    'keys': keys,
+    'deltas_ndcg_down': deltas_ndcg_down,
+    'deltas_ndcg_up': deltas_ndcg_up,
+}
 
- 
-#save dataframe 
-all_df = pd.concat([original_prompts_df,gpt_outputs_df,original_rankings_df,changed_rankings_df,deltas_df,blue_scores_df],axis = 1)
-all_df.columns = ['Original Summary','changed Summary','Original Ranking','Changed Ranking','Delta','blue_scores']
 
-all_df.to_csv(f'./results/{args.data_name}/gpt4_results_{taget_rank}_{direction}.csv')
-logging.info(f'Saved results to ./results/{args.data_name}/gpt4_results_{taget_rank}_{direction}.csv')
+df = pd.DataFrame(data)
+df.to_csv(f'./results/{args.data_name}/gpt4_results_large_{args.direction}.csv')
+logging.info(f'./results/{args.data_name}/gpt4_results_large_{args.direction}.csv')
 
