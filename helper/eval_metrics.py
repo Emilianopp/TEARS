@@ -1,147 +1,67 @@
 import math
 import numpy as np
+import bottleneck as bn
+import torch
 
 
-def precision_at_k_per_sample(actual, predicted, topk):
-    num_hits = 0
-    for place in predicted:
-        if place in actual:
-            num_hits += 1
-    return num_hits / (topk + 0.0)
+
+def Recall_at_k_batch(X_pred, heldout_batch, k=100,mean = True):
+    batch_users = X_pred.shape[0]
+    idx = bn.argpartition(-X_pred, k, axis=1)
+    X_pred_binary = np.zeros_like(X_pred, dtype=bool)
+    X_pred_binary[np.arange(batch_users)[:, np.newaxis], idx[:, :k]] = True
+    X_true_binary = (heldout_batch > 0)
+    tmp = (np.logical_and(X_true_binary, X_pred_binary).sum(axis=1)).astype(
+        np.float32)
+    recall = tmp / np.minimum(k, X_true_binary.sum(axis=1))
+    return recall.mean() if mean else recall
 
 
-def precision_at_k(actual, predicted, topk):
-    sum_precision = 0.0
-    num_users = len(predicted)
-    for i in range(num_users):
-        act_set = set(actual[i])
-        pred_set = set(predicted[i][:topk])
-        sum_precision += len(act_set & pred_set) / float(topk)
+def NDCG_binary_at_k_batch(X_pred, heldout_batch, k=100):
+    '''
+    Normalized Discounted Cumulative Gain@k for binary relevance
+    ASSUMPTIONS: all the 0's in heldout_data indicate 0 relevance
+    '''
+    batch_users = X_pred.shape[0]
 
-    return sum_precision / num_users
+    idx_topk_part = bn.argpartition(-X_pred, k, axis=1)
+    topk_part = X_pred[np.arange(batch_users)[:, np.newaxis],
+                       idx_topk_part[:, :k]]
+    idx_part = np.argsort(-topk_part, axis=1)
 
+    idx_topk = idx_topk_part[np.arange(batch_users)[:, np.newaxis], idx_part]
 
-def recall_at_k(actual, predicted, topk):
-
-    sum_recall = 0.0
-    num_users = len(predicted)
-    true_users = 0
-    for i in range(num_users):
-        act_set = set(actual[i])
-        pred_set = set(predicted[i][:topk])
-        if len(act_set) != 0:
-            sum_recall += len(act_set & pred_set) / float(len(act_set))
-            true_users += 1
-    return sum_recall / true_users
+    tp = 1. / np.log2(np.arange(2, k + 2))
 
 
-def recall_at_k_one(actual, predicted, topk):
-    sum_recall = 0.0
-    num_users = len(predicted)
-    true_users = 0
-
-    act_set = set(actual)
-   
-    pred_set = set(predicted[:topk])
-    if len(act_set) != 0:
-        sum_recall += len(act_set & pred_set) / float(len(act_set))
-        true_users += 1
-    return sum_recall / true_users
+    DCG = (heldout_batch[np.arange(batch_users)[:, np.newaxis],
+                         idx_topk] * tp).sum(axis=1)
 
 
-def recall_at_k_list(actual, predicted, topk):
-    res = []
-    sum_recall = 0.0
-    num_users = len(predicted)
-    true_users = 0
-    for i in range(num_users):
-        act_set = set(actual[i])
-        pred_set = set(predicted[i][:topk])
-        if len(act_set) != 0:
-            res.append(round(len(act_set & pred_set) / float(len(act_set)), 4))
-    return res
+    IDCG = np.array([(tp[:min(n, k)]).sum()
+                     for n in np.count_nonzero(heldout_batch,axis = 1)])
+    # print(f"{IDCG=}")
 
+    return DCG / IDCG
 
-def apk(actual, predicted, k=10):
-    """
-    Computes the average precision at k.
-    This function computes the average precision at k between two lists of
-    items.
-    Parameters
-    ----------
-    actual : list
-             A list of elements that are to be predicted (order doesn't matter)
-    predicted : list
-                A list of predicted elements (order does matter)
-    k : int, optional
-        The maximum number of predicted elements
-    Returns
-    -------
-    score : double
-            The average precision at k over the input lists
-    """
-    if len(predicted) > k:
-        predicted = predicted[:k]
+def MRR_at_k(X_pred, heldout_batch, k=100, mean = True):
+    '''
+    Mean Reciprocal Rank@k
+    ASSUMPTIONS: all the 0's in heldout_data indicate 0 relevance
+    '''
+    batch_users = X_pred.shape[0]
 
-    score = 0.0
-    num_hits = 0.0
+    idx_topk_part = bn.argpartition(-X_pred, k, axis=1)
+    topk_part = X_pred[np.arange(batch_users)[:, np.newaxis],
+                       idx_topk_part[:, :k]]
+    idx_part = np.argsort(-topk_part, axis=1)
 
-    for i, p in enumerate(predicted):
-        if p in actual and p not in predicted[:i]:
-            num_hits += 1.0
-            score += num_hits / (i + 1.0)
+    idx_topk = idx_topk_part[np.arange(batch_users)[:, np.newaxis], idx_part]
 
-    if not actual:
-        return 0.0
+    tp = 1. / (np.arange(1, k + 1))
 
-    return score / min(len(actual), k)
+    RR = (heldout_batch[np.arange(batch_users)[:, np.newaxis],
+                        idx_topk] * tp).max(axis=1)
 
-
-def mapk(actual, predicted, k=10):
-    """
-    Computes the mean average precision at k.
-    This function computes the mean average prescision at k between two lists
-    of lists of items.
-    Parameters
-    ----------
-    actual : list
-             A list of lists of elements that are to be predicted
-             (order doesn't matter in the lists)
-    predicted : list
-                A list of lists of predicted elements
-                (order matters in the lists)
-    k : int, optional
-        The maximum number of predicted elements
-    Returns
-    -------
-    score : double
-            The mean average precision at k over the input lists
-    """
-    return np.mean([apk(a, p, k) for a, p in zip(actual, predicted)])
-
-
-def ndcg_k(actual, predicted, topk):
-    res = 0
-    num_users = len(predicted)
-    for user_id in range(num_users):
-
-        k = min(topk, len(actual[user_id]))
-        idcg = idcg_k(k)
-        dcg_k = sum([int(predicted[user_id][j] in set(actual[user_id])) / math.log(j + 2, 2) for j in range(topk)])
-        res += dcg_k / idcg
-    return res / float(len(actual))
-
-
-# Calculates the ideal discounted cumulative gain at k
-def idcg_k(k):
-    res = sum([1.0 / math.log(i + 2, 2) for i in range(k)])
-    if not res:
-        return 1.0
-    else:
-        return res
-
-
-if __name__ == '__main__':
-    actual = [[1, 2], [3, 4, 5]]
-    predicted = [[10, 20, 1, 30, 40], [10, 3, 20, 4, 5]]
-    print(ndcg_k(actual, predicted, 5))
+    return np.mean(RR) if mean else RR
+    
