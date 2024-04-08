@@ -14,9 +14,9 @@ class T5ClassificationHead(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.dense = nn.Linear(config.d_model, config.d_model,bias = False)
+        self.dense = nn.Linear(config.d_model, config.d_model,bias = True)
         self.dropout = nn.Dropout(p=config.classifier_dropout)
-        self.out_proj = nn.Linear(config.d_model, config.num_labels,bias = False)
+        self.out_proj = nn.Linear(config.d_model, config.num_labels,bias = True)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.dropout(hidden_states)
@@ -118,7 +118,9 @@ class sentenceT5ClassificationFrozen(T5PreTrainedModel):
             logits=logits,
             past_key_values=outputs.past_key_values,
         )
-        
+   
+   
+     
 
         
 class MultiDAE(nn.Module):

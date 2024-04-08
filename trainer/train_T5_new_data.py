@@ -52,8 +52,10 @@ def train_fun(rank,world_size):
     start_time = time.time()
     #get unique hash for both gpus
     if not args.debug:
+        tags = [args.data_name]
         wandb.init(project='llm4rec', name=args.model_log_name,
-                   group=time.strftime("%d-%m-%Y_%H:%M:%S", time.localtime()))
+                   group=time.strftime("%d-%m-%Y_%H:%M:%S", time.localtime()),
+                   tags = tags,config=args)
         wandb.config.update(args)
         wandb.watch_called = False  # To avoid re-watching the model
         wandb.define_metric("batch")
@@ -69,7 +71,7 @@ def train_fun(rank,world_size):
     
 
     tokenizer = T5Tokenizer.from_pretrained('t5-large')
-    prompts,rec_dataloader,num_movies,val_dataloader,test_dataloader,val_data_tr,test_data_tr= load_data(args,tokenizer,rank,world_size)
+    prompts,rec_dataloader,num_movies,val_dataloader,test_dataloader,val_data_tr,test_data_tr,non_bin_dataloader= load_data(args,tokenizer,rank,world_size)
     model_name = f"{args.embedding_module}-large"
     
     if args.embedding_module == 't5_classification':
@@ -113,19 +115,19 @@ def train_fun(rank,world_size):
                             'validation_loss': val_loss,
                             'epoch': e})
 
-            if outputs['recall@20'] > min_val_recall:
-                min_val_recall = outputs['recall@20']
+            if outputs['ndcg@50'] > min_val_recall:
+                min_val_recall = outputs['ndcg@50']
                 torch.save(model.module.state_dict(), f'{args.scratch}/saved_model/{args.data_name}/{args.model_log_name}.pt')
                 last_saved_epoch = e
-                wandb.log({'val_recall@20_max': min_val_recall})
+                wandb.log({'ndcg@50_max': min_val_recall})
                 wandb.log({'last_saved_epoch': last_saved_epoch})
                 print(f"Early stopping training at epoch {e}")
                 if args.patience == patience_counter:
                     print(f"Early stopping training at epoch {e}")
-                    break
-            break 
+                    
+             
 
-            pbar.set_postfix({'val_loss': val_loss,'val_recall': outputs['ndcg@20'],'ndcg': outputs['recall@20'],'last_saved_epoch': last_saved_epoch})
+            pbar.set_postfix({'val_loss': val_loss,'val_ndcg': outputs['ndcg@50'],'recall': outputs['recall@50'],'last_saved_epoch': last_saved_epoch})
             
     model.module.load_state_dict(torch.load(f'{args.scratch}/saved_model/{args.data_name}/{args.model_log_name}.pt'))
     model.to(rank)
@@ -141,17 +143,23 @@ def train_fun(rank,world_size):
 
 
     log_results = pd.DataFrame({'model_name': [args.model_log_name],
+                                    'test_recall@10': [test_outputs['recall@10']],
                                     'test_recall@20': [test_outputs['recall@20']],
-                                    'test_recall@50': [test_outputs['recall@20']],
+                                    'test_recall@50': [test_outputs['recall@50']],
+                                    'test_ndcg@20': [test_outputs['ndcg@10']],
                                     'test_ndcg@20': [test_outputs['ndcg@20']],
                                     'test_ndcg@50': [test_outputs['ndcg@50']],
+                                    'test_MRR@10' : [test_outputs['mrr@10']],
+                                    'test_MRR@20' : [test_outputs['mrr@20']],
+                                    'test_MRR@50' : [test_outputs['mrr@50']],
                                     'val_recall@20': [val_outputs['recall@20']],
                                     'val_recall@50': [val_outputs['recall@50']],
                                     'val_ndcg@20': [val_outputs['ndcg@20']],
                                     'val_ndcg@50': [val_outputs['ndcg@50']],
-                                    'train_time_min': [elapsed_time / 60]}).round(3)
+                                    'train_time_min': [elapsed_time / 60]}).round(4)
 
     csv_path = f"./model_logs/{args.data_name}/parameter_sweep.csv"
+    print(f'Saved to {csv_path}')
     # Check if the CSV file already exists
     if os.path.exists(csv_path):
         existing_data = pd.read_csv(csv_path)
