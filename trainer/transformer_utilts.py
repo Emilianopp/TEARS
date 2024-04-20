@@ -30,11 +30,11 @@ from tqdm import tqdm
 
 def load_data(args,tokenizer= None, rank=0,world_size=1):
     data_path = f'./data_preprocessed/{args.data_name}/'
-    loader = MatrixDataLoader(data_path)
+    loader = MatrixDataLoader(data_path,args)
     
-    train_data,non_binary_data = loader.load_data('train')
-    vad_data_tr, valid_data,_,_ = loader.load_data('validation')
-    test_data_tr, test_data,_,_ = loader.load_data('test')
+    train_data,train_data_tr = loader.load_data('train')
+    valid_data_tr, valid_data = loader.load_data('validation')
+    test_data_tr, test_data = loader.load_data('test')
     num_users = train_data.shape[0]
     num_movies = train_data.shape[1]
 
@@ -63,14 +63,14 @@ def load_data(args,tokenizer= None, rank=0,world_size=1):
     print(f"Number of Movies is {num_movies=}")
     
     #half the batch if we are doubleing the training data by making sure the original is in there
-    rec_dataloader = get_dataloader(train_data,rank,world_size,args.bs//2 if  args.masked_and_original else args.bs,encodings,nonzer_indeces_train, None,prompts,args.mask)
-    augmented_dataloader = get_dataloader(train_data,rank,world_size,args.bs//2 if  args.masked_and_original else args.bs,encodings,nonzer_indeces_train, tokenizer,prompts,args.mask)
-    val_dataloader = get_dataloader(valid_data,rank,world_size,args.bs,encodings,nonzer_indeces_valid)
-    test_dataloader = get_dataloader(test_data,rank,world_size,args.bs,encodings,nonzer_indeces_test)
-    non_bin_dataloader = get_dataloader(non_binary_data,rank,world_size,args.bs,encodings,nonzer_indeces_train)
+    rec_dataloader = get_dataloader(train_data,train_data_tr,rank,world_size,args.bs//2 if  args.masked_and_original else args.bs,encodings,nonzer_indeces_train, None,prompts,args.mask)
+    augmented_dataloader = get_dataloader(train_data,train_data_tr,rank,world_size,args.bs//2 if  args.masked_and_original else args.bs,encodings,nonzer_indeces_train, tokenizer,prompts,args.mask)
+    val_dataloader = get_dataloader(valid_data,valid_data_tr,rank,world_size,args.bs,encodings,nonzer_indeces_valid)
+    test_dataloader = get_dataloader(test_data,test_data_tr,rank,world_size,args.bs,encodings,nonzer_indeces_test)
+    # non_bin_dataloader = get_dataloader(train_data_tr,rank,world_size,args.bs,encodings,nonzer_indeces_train)
     
 
-    return prompts,rec_dataloader,augmented_dataloader,num_movies,val_dataloader,test_dataloader,vad_data_tr,test_data_tr,non_bin_dataloader
+    return prompts,rec_dataloader,augmented_dataloader,num_movies,val_dataloader,test_dataloader,valid_data_tr,test_data_tr
 
 
 def load_data_items_as_tokens(args,tokenizer= None, rank=0,world_size=1):
@@ -131,20 +131,19 @@ def load_data_items_as_tokens(args,tokenizer= None, rank=0,world_size=1):
 
 
 
-def get_dataloader(data,rank,world_size,bs,encodings,nonzer_indeces_train,tokenizer=None,prompts=None,mask=None):
-    rec_dataset =  DataMatrix(data,encodings,nonzer_indeces_train,tokenizer,prompts,mask)
+def get_dataloader(data,train_data_tr,rank,world_size,bs,encodings,nonzer_indeces_train,tokenizer=None,prompts=None,mask=None):
+    rec_dataset =  DataMatrix(data,train_data_tr,encodings,nonzer_indeces_train,tokenizer,prompts,mask)
     sampler = DistributedSampler(rec_dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False)
     rec_dataloader = DataLoader(rec_dataset, batch_size=bs, collate_fn= rec_dataset.custom_collator if tokenizer is not None else None  , num_workers = 0,pin_memory=False,
                                 sampler = sampler) 
     return rec_dataloader
 
 
-def get_embeddings(model, dataloader, rank, world_size, num_movies, tokenizer, save_path, save_name, save=True):
+def get_embeddings(model, dataloader, rank, world_size, num_movies, tokenizer, save_path, save_name, save=True,bfloat16 = False):
     model.eval()
     if os.path.exists(os.path.join(save_path, save_name)):
-        with open(save_path + '/' +save_name , 'rb') as f:
 
-            embeddings = pickle.load(f)
+        embeddings = torch.load(os.path.join(save_path, save_name))
 
     else:
 
@@ -158,9 +157,10 @@ def get_embeddings(model, dataloader, rank, world_size, num_movies, tokenizer, s
                 batch_embeddings = model.llm_forward(input_ids=input_ids, attention_mask=attention_mask)
 
                 for i in range(len(idx)):
-                    embeddings[idx[i].item()] = batch_embeddings[i].float().cpu().numpy()
+                    embeddings[idx[i].item()] = batch_embeddings[i].cpu()
 
-
+                    #assert there are no nans in the embeddings
+                    assert not torch.isnan(embeddings[idx[i].item()]).any()
         if world_size > 1:
             embeddings = dist.gather(embeddings, dst=0)
             if rank == 0:
@@ -168,13 +168,17 @@ def get_embeddings(model, dataloader, rank, world_size, num_movies, tokenizer, s
 
         if rank == 0 and save:
             os.makedirs(save_path, exist_ok=True)
+            torch.save(embeddings, os.path.join(save_path, save_name))
+            
 
-            with open(os.path.join(save_path, save_name), 'wb') as f:
-                pickle.dump(embeddings, f)
+        # if bfloat16:
+        #     embeddings = {k: torch.tensor(v).bfloat16() for k, v in embeddings.items()}
+        # else: 
+        #     embeddings = {k: torch.tensor(v) for k, v in embeddings.items()}
 
     return embeddings
 
-def eval_model(model, test_dataloader, rank, test_data_tr,precompute_embeddings,loss_f = None, mult_process=True, world_size=2):
+def eval_model(model, test_dataloader, rank, test_data_tr,precompute_embeddings,loss_f = None, mult_process=True, world_size=2,vae = False):
     torch.cuda.set_device(rank)
     metrics = defaultdict(list)
     output_metrics = defaultdict(float)
@@ -188,27 +192,36 @@ def eval_model(model, test_dataloader, rank, test_data_tr,precompute_embeddings,
         for b, item in enumerate(test_dataloader):
             user_ids = sum(item.pop('idx').cpu().tolist(), [])
             user_id_set.update(user_ids)
-            item = {k: v.to(rank) for k, v in item.items()}
+            item = {k: v.to(rank) for k, v in item.items()}            
             if precompute_embeddings is not None: 
-
                 hidden_states = [precompute_embeddings[idx] for idx in user_ids]
-                hidden_states = torch.tensor(hidden_states).to(rank).bfloat16()
-                movie_emb_clean = model.module.classifier_forward(hidden_states)
+                hidden_states = torch.stack(hidden_states).to(rank)
+                if vae: 
+                    train_items = item['labels_tr']
+                    movie_emb_clean,mu,logvar = model.module.classifier_forward(train_items, hidden_states)
+                else:
+                    movie_emb_clean = model.module.classifier_forward(hidden_states)  
             else:
-                movie_emb_clean = model(**item)[0]
-            masked_rows = test_data_tr[user_ids].toarray()
+                if vae: 
+                    train_items = item['labels_tr']
+                    movie_emb_clean,mu,logvar = model(data_tensor=train_items, input_ids = item['input_ids'],attention_mask = item['attention_mask'])
+                    
+                else:
+                    movie_emb_clean = model(**item)[0]
+            masked_rows = item['labels_tr'].cpu().numpy()
             movie_emb_clean[np.where(masked_rows > 0)] = np.log(.0001)
 
-            rolling_loss += loss_f(movie_emb_clean, item['labels'].to(rank)).item()
+            labels = item['labels']
+            labels[labels >=1] = 1 
+            rolling_loss += loss_f(movie_emb_clean, labels).item()
             # movie_emb_clean[np.where(masked_rows > 0)] = -torch.inf
             user_ids_l.append(user_ids)
-            labels = item['labels'].cpu().numpy()
             recon = movie_emb_clean.float().cpu().numpy()
             k_values = [10, 20, 50]
-
+            #binarize labels 
+            labels = labels.cpu().numpy()
             for k in k_values:
                 metrics[f'ndcg@{k}'].append(NDCG_binary_at_k_batch(recon, labels, k=k).tolist())
-
                 metrics[f'mrr@{k}'].append(MRR_at_k(recon, labels, k=k,mean = False).tolist())
                 metrics[f'recall@{k}'].append(Recall_at_k_batch(recon, labels, k=k,mean = False).tolist())
 
@@ -216,7 +229,7 @@ def eval_model(model, test_dataloader, rank, test_data_tr,precompute_embeddings,
 
 
 
-        
+            
         if mult_process:
             ranked_movies_all, losses = [None for _ in range(world_size)], [None for _ in range(world_size)]
             dist.all_gather_object(ranked_movies_all, {})
@@ -230,10 +243,11 @@ def eval_model(model, test_dataloader, rank, test_data_tr,precompute_embeddings,
         
         else: 
             for key in metrics.keys():
-                output_metrics[key] = np.mean(metrics[key])
+                output_metrics[key] = np.mean(sum(metrics[key],[]))
                 losses = rolling_loss / len(test_dataloader)
             
     return losses,dict(output_metrics)
+
 
 
 
@@ -278,41 +292,41 @@ def train_fineTuning(args, rec_dataloader,augmented_dataloader, model, optimizer
     for b, (items,augmented_items) in enumerate(zip(rec_dataloader,augmented_dataloader)):
         model.train()
         
-        # with torch.cuda.amp.autocast():
+        with torch.cuda.amp.autocast():
+            if args.mask == 0: 
+                labels = items['labels']
+                input_ids = items['input_ids']
+                attention_mask = items['attention_mask']
+            else:
+                input_ids = pad_tensors(items['input_ids'],augmented_items['input_ids'],tokenizer.pad_token_id)
+                labels = torch.cat((items['labels'],augmented_items['labels']))
+                attention_mask = pad_tensors(items['attention_mask'], augmented_items['attention_mask'], 0)
             
-        if args.mask == 0: 
-            labels = items['labels']
-            input_ids = items['input_ids']
-            attention_mask = items['attention_mask']
-        else:
-            input_ids = pad_tensors(items['input_ids'],augmented_items['input_ids'],tokenizer.pad_token_id)
-            labels = torch.cat((items['labels'],augmented_items['labels']))
-            attention_mask = pad_tensors(items['attention_mask'], augmented_items['attention_mask'], 0)
-        
-        
-        if precompute_embeddings is not None: 
-
-            hidden_states = [precompute_embeddings[idx.item()] for idx in items['idx'].cpu().numpy()]
-            hidden_states = torch.tensor(hidden_states).to(rank).bfloat16()
-            movie_emb = model.module.classifier_forward(hidden_states)
-        
-
-        else: 
-            movie_emb = model(input_ids=input_ids, attention_mask=attention_mask)[0]
-        loss = loss_f(movie_emb, labels.to(rank)) / args.update_every
+            
+            if precompute_embeddings is not None: 
     
-        loss.backward()
+                hidden_states = [precompute_embeddings[idx.item()] for idx in items['idx'].cpu().numpy()]
+        
+                hidden_states = torch.stack(hidden_states).to(rank)
+                movie_emb = model.module.classifier_forward(hidden_states)
+            
+    
+            else: 
+                movie_emb = model(input_ids=input_ids.to(rank), attention_mask=attention_mask.to(rank))[0]
+            loss = loss_f(movie_emb, labels.to(rank)) / args.update_every
+    
+        scaler.scale(loss).backward()
         
         if (b + 1) % args.update_every == 0:
-            optimizer.step()
-            # scaler.update()
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad(set_to_none=True)
         
         rolling_loss.append(loss.item() * args.update_every)
 
         torch.cuda.empty_cache() 
         pbar.set_description(f"Epoch {epoch}: Batch: {b} loss: {np.mean(rolling_loss)} current lr: {scheduler.get_last_lr()[0]}")
-         
+
             
     if not args.debug  :
 
@@ -325,38 +339,50 @@ def train_fineTuning(args, rec_dataloader,augmented_dataloader, model, optimizer
     pbar.set_description(f"Batch {epoch}: loss: {np.mean(rolling_loss)} current lr: {scheduler.get_last_lr()[0]}")
     scheduler.step()
 
-def train_distill(args, rec_dataloader, model, optimizer, scheduler,pbar,epoch,rank,non_binary_data,teacher):
+def train_distill(args, rec_dataloader, model, optimizer, scheduler,pbar,epoch,rank,precompute_embeddings):
     rec_dataloader.sampler.set_epoch(epoch)
 
-    
-    loss_f = get_loss('kl',args)
+    loss_f = get_loss(args.loss)
     scaler = torch.cuda.amp.GradScaler()
     rolling_loss = []
     kl_roll = []
     
+    global update_count
+    update_count = 0
 
-    for b,(items,non_bin_items) in enumerate(zip(rec_dataloader,non_binary_data)):
+
+    for b,items in enumerate(rec_dataloader):
             model.train()
-
             labels = items['labels'].to(rank)
+            train_items = items['labels_tr'].to(rank)
             optimizer.zero_grad(set_to_none = True )
-            movie_emb = model(input_ids = items['input_ids'], attention_mask = items['attention_mask'])[0]
-            #mask half of the labels which are one 
-            teacher_logits = teacher(non_bin_items['labels'])
-            total_loss,kl,loss = loss_f(movie_emb,items['labels'].to(rank),teacher_logits)
-            loss_f.anneal_beta(epoch, args.epochs)
-            scaler.scale(total_loss).backward()
-            scaler.step(optimizer)
+            if precompute_embeddings is not None:
+                hidden_states = [precompute_embeddings[idx.item()] for idx in items['idx'].cpu().numpy()]
+                hidden_states = torch.stack(hidden_states).to(rank)
+                movie_emb,mu,logvar = model.module.classifier_forward(train_items, hidden_states)
+                
+            else: 
+                hidden_states = None 
+                movie_emb,mu,logvar = model(data_tensor=train_items, input_ids = items['input_ids'],attention_mask = items['attention_mask'])
+            if 200000 > 0:
+                anneal = min(.5, 
+                            1. * update_count / 20000)
+            else:
+                anneal = args.anneal_cap
+                
+            loss = loss_f(movie_emb,labels,mu,logvar,anneal)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            loss.backward()
+            optimizer.step()
             rolling_loss.append( loss.item())
-            kl_roll.append(kl.item())
-            scaler.update()
             torch.cuda.empty_cache() 
+            update_count += 1
             pbar.set_description(f"Epoch {epoch}: Batch: {b} loss: {np.mean(rolling_loss)} current lr: {scheduler.get_last_lr()[0]}")
-            
+
+
     if not args.debug  :
 
         wandb.log({'loss': np.mean(rolling_loss),
-                   'kl_loss': np.mean(kl_roll),
                     "epoch": epoch,
                     "total_steps": epoch*len(rec_dataloader) + b,
                     'lr': scheduler.get_last_lr()[0],
@@ -440,7 +466,10 @@ def parse_args(notebook = False):  # Parse command line arguments
     parser.add_argument("--lora_alpha", type=int, default=16)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument('--no_bias', action='store_true')
+    parser.add_argument('--binarize', action='store_true')
+    parser.add_argument('--eval_control', action='store_true')
     parser.add_argument('--debug_prompts', action='store_true')
+    parser.add_argument('--mask_control_labels', action='store_true')
 
     args = parser.parse_args() if not notebook else parser.parse_args(args=[])
     args.recon = False
