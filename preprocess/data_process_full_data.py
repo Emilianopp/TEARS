@@ -143,7 +143,7 @@ def generate_train_val_test_splits(ratings, k):
 
 
         # Randomly choose one movie for validation and remove it from user's ratings
-        prompt_movies,validation_movie, test_movie,training_set  =split_and_filter_ratings(user_movies)
+        prompt_movies,validation_movie, test_movie,training_set = split_and_filter_ratings(user_movies)
         if prompt_movies is None:
             non_users.append(user_id)
             continue
@@ -188,8 +188,13 @@ if __name__ == "__main__":
         # Load movie metadata
         movie_metadata = pd.read_csv('../data/merged_asin_movielens_summary.csv')
 
-        train_data, val_data, test_data,promp_set,non_users = generate_train_val_test_splits(ratings, k, movie_metadata)
 
+        # print(f"{ratings=}")
+        ratings = ratings.merge(movie_metadata, left_on='itemId', right_on='movielens_id', how = 'left')
+      
+        # exit()
+        train_data, val_data, test_data,promp_set,non_users = generate_train_val_test_splits(ratings, k)
+ 
     elif data_name == 'books':
         ratings_file = '../data/books/ratings.csv'
         ratings = pd.read_csv(ratings_file)

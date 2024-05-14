@@ -8,12 +8,14 @@ import numpy as np
 import argparse
 random.seed(2024)
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Data Preprocessing")
     parser.add_argument('--data_name', type=str, default='ml-1m',
                         help='name of the dataset')
     parser.add_argument('--filtered' , action = 'store_true', default = False)
     return parser.parse_args()
+args = parse_args()
 
 
 
@@ -177,7 +179,11 @@ def split_train_test_proportion(data, test_prop=0.2):
 
     np.random.seed(98765)
     promt_dataset = pd.read_csv(f'../data_preprocessed/{args.data_name }/prompt_set_timestamped.csv')
-    promt_dataset = promt_dataset[promt_dataset.rating > 3]
+    if args.data_name =='ml-1m':
+        promt_dataset.rename(columns={'movieId':'itemId'}, inplace=True)
+        
+        
+    # promt_dataset = promt_dataset[promt_dataset.rating > 3]
     for _, group in data_grouped_by_user:
 
         n_items_u = len(group)
@@ -202,12 +208,15 @@ def numerize(tp, profile2id, show2id):
     
     uid = tp['userId'].apply(lambda x: profile2id[x] if x in profile2id else np.nan)
     sid = tp['itemId'].apply(lambda x: show2id[x] if x in show2id else np.nan)
-    
-    ratings = tp['rating']
-    titles = tp['title']
+    if 'title' in tp.columns:
+        ratings = tp['rating']
+        titles = tp['title']
 
     # genres = tp['genres']
-    out_df = pd.DataFrame(data={'uid': uid, 'sid': sid,'rating':ratings,'title':titles}, columns=['uid', 'sid','rating','title'])
+        out_df = pd.DataFrame(data={'uid': uid, 'sid': sid,'rating':ratings,'title':titles}, columns=['uid', 'sid','rating','title'])
+    else: 
+        ratings = tp['rating']
+        out_df = pd.DataFrame(data={'uid': uid, 'sid': sid,'rating':ratings}, columns=['uid', 'sid','rating'])
     #filter out nans 
     out_df = out_df[out_df.uid.notna()]
     out_df = out_df[out_df.sid.notna()]
@@ -221,7 +230,6 @@ def numerize(tp, profile2id, show2id):
 
 if __name__ == '__main__':
 
-    args = parse_args()
     print(f"Load and Preprocess {args.data_name} dataset")
     
     # Load Data
@@ -230,14 +238,15 @@ if __name__ == '__main__':
     # raw_data = pd.read_csv(os.path.join(DATA_DIR, 'ratings.csv'), header=0) READ LIKE THIS BUT IT IS A .DAT FILE WITH SEP = ::
         raw_data = pd.read_csv(f'../data/{args.data_name}/ratings.dat', sep="::", header=None, encoding='ISO-8859-1')
         raw_data.columns = ['userId', 'itemId', 'rating', 'timestamp']
-
+        #make sure each item has been seen at leat 5 times 
+        # raw_data = raw_data[raw_data['itemId'].map(raw_data['itemId'].value_counts()) > 4]
 
 
     elif args.data_name == 'books':
         raw_data = pd.read_csv(f'../data/{args.data_name}/ratings.csv', header=0)
         raw_data.rename(columns={'book_id':'itemId','review/time':'timestamp','Title':'title','review/score':'rating','User_id':'userId','categories':'genres'}, inplace=True)
     elif args.data_name =='goodbooks':
-        print(f"{args.filtered=}")
+
         if args.filtered: 
             raw_data = pd.read_csv(f'../data/{args.data_name}/ratings_filtered.csv', header=0)    
         else: 
@@ -255,15 +264,7 @@ if __name__ == '__main__':
         valid_item_names = raw_data.title.unique().tolist()
         strong_generalization_set = pd.read_csv(f'../data_preprocessed/{args.data_name}/strong_generalization_set_.csv')
 
-
-        
-    #the lines below are a test that reduce the data
-    '''
-    raw_data = raw_data[raw_data['rating'] > 3]
-    print(f"{len(raw_data.userId.unique())=}")
-    print(f"{len(raw_data.itemId.unique())=}")
-    '''
-    raw_data_ratings  = raw_data[raw_data['rating'] > 3]
+    # raw_data_ratings  = raw_data[raw_data['rating'] > 3]
 
     print(f"{len(raw_data.userId.unique())=}")
     print(f"{len(raw_data.itemId.unique())=}")
@@ -271,7 +272,7 @@ if __name__ == '__main__':
 
 
     # Filter Data
-    raw_data_ratings, user_activity, item_popularity = filter_triplets(raw_data_ratings)
+    raw_data_ratings, user_activity, item_popularity = filter_triplets(raw_data)
     raw_data = raw_data[raw_data['userId'].isin(raw_data_ratings.userId.unique())]
 
 
@@ -297,8 +298,15 @@ if __name__ == '__main__':
     train_data = pd.read_csv(f'../data_preprocessed/{args.data_name }/train_leave_one_out_.csv')
     
     strong_generalization_set = pd.read_csv(f'../data_preprocessed/{args.data_name }/strong_generalization_set_.csv')
+    if args.data_name =='ml-1m':
+        
+        train_data.rename(columns={'movieId':'itemId'}, inplace=True)
+        strong_generalization_set.rename(columns={'movieId':'itemId'}, inplace=True)
+
     #filter such that the rating is higher than 3 
     # strong_generalization_set = strong_generalization_set[strong_generalization_set.rating > 3]
+    # print(f"{train_data=}")
+    # exit()
     print(f"{len(pd.unique(train_data['itemId']))=}")
 
     # train_data = train_data[train_data.rating > 3]
@@ -329,10 +337,18 @@ if __name__ == '__main__':
     print(f"{len(te_users)=}")
 
     train_plays = raw_data.loc[raw_data['userId'].isin(tr_users)]
-
-    unique_sid = set (pd.unique(train_plays['itemId'])) | set(pd.unique(strong_generalization_set['itemId']))
+    if args.data_name == 'ml-1m':
+        unique_sid = set (pd.unique(train_plays['itemId']))  & set(pd.unique(strong_generalization_set_val['itemId'])) & set(pd.unique(strong_generalization_set_test['itemId']))
+        unique_sid = set(raw_data.loc[(raw_data['itemId'].isin(unique_sid)) & (raw_data['rating'] > 3)].itemId)
+    else:
+        unique_sid = set (pd.unique(train_plays['itemId']))  | set(pd.unique(strong_generalization_set_val['itemId'])) | set(pd.unique(strong_generalization_set_test['itemId']))
+        
     print(f"{len(unique_sid)=}")
 
+
+    # print(f"{len(valid_items)=}")
+    # print(f"{len(unique_sid)=}")
+    # exit()
     show2id = dict((sid, i) for (i, sid) in enumerate(unique_sid))
     profile2id = dict((pid, i) for (i, pid) in enumerate(prompts_keys) )
 
@@ -353,11 +369,14 @@ if __name__ == '__main__':
         for sid in unique_sid:
             f.write('%s\n' % sid)
     
+    print(f"{raw_data=}")
     vad_plays = raw_data.loc[raw_data['userId'].isin(vd_users)]
 
     vad_plays = vad_plays.loc[vad_plays['itemId'].isin(unique_sid)]
 
+
     vad_plays_tr, vad_plays_te = split_train_test_proportion(vad_plays)
+
     #save vad_plays_tr to use as validation set for the training of the VAE
 
     vad_plays_tr.to_csv(os.path.join(DATA_DIR, 'validation_tr_.csv'), index=False)
@@ -372,9 +391,10 @@ if __name__ == '__main__':
     test_plays_tr = test_plays_tr.loc[test_plays_tr['userId'].isin(test_plays_te.userId)]
 
 
+    
     train_data = numerize(train_plays, profile2id, show2id)
     #make sure the train_data is above 3 
-    train_data = train_data[train_data.rating > 3]
+    # train_data = train_data[train_data.rating > 3]
     
     train_data.to_csv(os.path.join(DATA_DIR, 'train.csv'), index=False)
 

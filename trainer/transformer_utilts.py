@@ -23,16 +23,18 @@ import pickle
 from trainer.losses.loss import get_loss
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm 
+import datetime
+update_count =0
 
 
 
-
+ 
 
 def load_data(args,tokenizer= None, rank=0,world_size=1):
-    data_path = f'./data_preprocessed/{args.data_name}/'
+    data_path = f'/home/mila/e/emiliano.penaloza/LLM4REC/data_preprocessed/{args.data_name}/'
     loader = MatrixDataLoader(data_path,args)
     
-    train_data,train_data_tr = loader.load_data('train')
+    train_data_tr,train_data = loader.load_data('train')
     valid_data_tr, valid_data = loader.load_data('validation')
     test_data_tr, test_data = loader.load_data('test')
     num_users = train_data.shape[0]
@@ -73,66 +75,10 @@ def load_data(args,tokenizer= None, rank=0,world_size=1):
     return prompts,rec_dataloader,augmented_dataloader,num_movies,val_dataloader,test_dataloader,valid_data_tr,test_data_tr
 
 
-def load_data_items_as_tokens(args,tokenizer= None, rank=0,world_size=1):
-    data_path = f'./data_preprocessed/books/'
-    print(f"{data_path=}")
-
-    loader = MatrixDataLoader(data_path)
-
-    train_data,non_binary_data = loader.load_data('train')
-    vad_data_tr, valid_data,rating_vad_data_tr, rating_valid_data = loader.load_data('validation')
-    test_data_tr, test_data,rating_test_data_tr, rating_test_data = loader.load_data('test')
-
-    num_users = train_data.shape[0]
-    num_movies = train_data.shape[1]
-    #binarize non_binary_data
-    rating_all = non_binary_data + rating_vad_data_tr + rating_test_data_tr
-
-    nonzer_indeces_train = {i:v for i,v in enumerate(set(train_data.sum(axis =1 ).nonzero()[0]))}
-    nonzer_indeces_valid = {i:v for i,v in enumerate(set(valid_data.sum(axis =1 ).nonzero()[0]))}
-    nonzer_indeces_test = {i:v for i,v in enumerate(set(test_data.sum(axis = 1).nonzero()[0]))}
-
-    with open (f'{data_path}/profile2id.pkl','rb') as f:
-        profile2id = pickle.load(f)
-    with open(f'./saved_user_summary/{args.data_name}/user_summary_gpt4_.json','r') as f:
-        prompts = json.load(f)
-        
-
-    prompts = {profile2id[int(float(k))]:v for k,v in prompts.items() } 
-    new_tokens = [f'<item_id_{i}>' for i in range(num_movies)] + [f'<rating_{k}>' for k in range(1,6)]
-
-    tokenizer.add_tokens(new_tokens)
-    for u in range(num_users): 
-        nonzero_columns = set(rating_all[u].nonzero()[1])
-        #make the prompt with the tokens 
-        prompts[u] = ''
-        for i in nonzero_columns:
-            rating = rating_all[u,i]
-            prompts[u] += f' <item_id_{i}> <rating_{int(rating)}>\n'
- 
-
-    promp_list = [v for k,v in prompts.items()]
-    max_l = max([len(i.split()) for i in promp_list])
-    #calculate the max_token_length by tokenizing all the prompts 
-    max_token_l = max([len(tokenizer.encode(v)) for v in promp_list])
-    encodings = {k: tokenizer([v],padding='max_length', return_tensors='pt',truncation=True,max_length=max_token_l ) for k, v in sorted(prompts.items())} 
-
-    encodings = {k: {k1: v1.squeeze(0) for k1, v1 in v.items()} for k, v in encodings.items()}
-    print(f"Number of Users is {num_users=}")
-    print(f"Number of Movies is {num_movies=}")
 
 
-    rec_dataloader = get_dataloader(train_data,rank,world_size,args.bs,encodings,nonzer_indeces_train)
-    val_dataloader = get_dataloader(valid_data,rank,world_size,args.bs,encodings,nonzer_indeces_valid)
-    test_dataloader = get_dataloader(test_data,rank,world_size,args.bs,encodings,nonzer_indeces_test)
-    non_bin_dataloader = get_dataloader(non_binary_data,rank,world_size,args.bs,encodings,nonzer_indeces_train)
-
-    return prompts,rec_dataloader,num_movies,val_dataloader,test_dataloader,vad_data_tr,test_data_tr,non_bin_dataloader,tokenizer
-
-
-
-def get_dataloader(data,train_data_tr,rank,world_size,bs,encodings,nonzer_indeces_train,tokenizer=None,prompts=None,mask=None):
-    rec_dataset =  DataMatrix(data,train_data_tr,encodings,nonzer_indeces_train,tokenizer,prompts,mask)
+def get_dataloader(data,train_data_tr,rank,world_size,bs,encodings,nonzer_indeces_train,tokenizer=None,prompts=None,mask=None,user_id_to_row=None):
+    rec_dataset =  DataMatrix(data,train_data_tr,encodings,nonzer_indeces_train,tokenizer,prompts,mask,user_id_to_row)
     sampler = DistributedSampler(rec_dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False)
     rec_dataloader = DataLoader(rec_dataset, batch_size=bs, collate_fn= rec_dataset.custom_collator if tokenizer is not None else None  , num_workers = 0,pin_memory=False,
                                 sampler = sampler) 
@@ -175,10 +121,11 @@ def get_embeddings(model, dataloader, rank, world_size, num_movies, tokenizer, s
         #     embeddings = {k: torch.tensor(v).bfloat16() for k, v in embeddings.items()}
         # else: 
         #     embeddings = {k: torch.tensor(v) for k, v in embeddings.items()}
-
+ 
     return embeddings
 
-def eval_model(model, test_dataloader, rank, test_data_tr,precompute_embeddings,loss_f = None, mult_process=True, world_size=2,vae = False):
+def eval_model(args,model, test_dataloader, rank, test_data_tr,precompute_embeddings,loss_f = None, mult_process=True, world_size=2,vae = False,alpha = .5,
+               to_mask = None):
     torch.cuda.set_device(rank)
     metrics = defaultdict(list)
     output_metrics = defaultdict(float)
@@ -187,33 +134,70 @@ def eval_model(model, test_dataloader, rank, test_data_tr,precompute_embeddings,
     model.to(rank)
     rolling_loss = 0 
     metrics = defaultdict(list)
+    logits_rec = None
+    loss = None
     with torch.no_grad():
         model.eval()
         for b, item in enumerate(test_dataloader):
             user_ids = sum(item.pop('idx').cpu().tolist(), [])
             user_id_set.update(user_ids)
-            item = {k: v.to(rank) for k, v in item.items()}            
-            if precompute_embeddings is not None: 
-                hidden_states = [precompute_embeddings[idx] for idx in user_ids]
-                hidden_states = torch.stack(hidden_states).to(rank)
-                if vae: 
-                    train_items = item['labels_tr']
-                    movie_emb_clean,mu,logvar = model.module.classifier_forward(train_items, hidden_states)
-                else:
-                    movie_emb_clean = model.module.classifier_forward(hidden_states)  
-            else:
-                if vae: 
-                    train_items = item['labels_tr']
-                    movie_emb_clean,mu,logvar = model(data_tensor=train_items, input_ids = item['input_ids'],attention_mask = item['attention_mask'])
-                    
-                else:
-                    movie_emb_clean = model(**item)[0]
-            masked_rows = item['labels_tr'].cpu().numpy()
-            movie_emb_clean[np.where(masked_rows > 0)] = np.log(.0001)
-
+            item = {k: v.to(rank) for k, v in item.items()}  
             labels = item['labels']
-            labels[labels >=1] = 1 
+
+
+
+            labels[labels >=1] = 1     
+                 
+
+
+
+
+            if args.embedding_module == 'RecVAE':
+
+                movie_emb_clean,loss = model(item['labels_tr'],labels ,calculate_loss = True)
+                # print(f"LOSS FROM MODEL {loss=}")
+            elif args.embedding_module == 'MacridVAE':
+                movie_emb_clean,loss = model(item['labels_tr'],labels )
+                
+            elif args.embedding_module == 'T5Vae' or args.embedding_module =='OTRecVAE' or args.embedding_module =='MacridTEARS' :
+
+                movie_emb_clean,logits_rec,logits_text,*_ = model(data_tensor=item['labels_tr'], input_ids = item['input_ids'],attention_mask = item['attention_mask'],alpha  =alpha)
+            elif args.embedding_module in ['OTVae' ,'FT5RecVAE']:
+                _,_,movie_emb_clean,*_ = model(data_tensor=item['labels_tr'], input_ids = item['input_ids'],attention_mask = item['attention_mask'],alpha  =alpha)
+            
+            else:     
+                if precompute_embeddings is not None: 
+                    hidden_states = [precompute_embeddings[idx] for idx in user_ids]
+                    hidden_states = torch.stack(hidden_states).to(rank)
+                    if vae: 
+                        train_items = item['labels_tr']
+                        movie_emb_clean,mu,logvar = model.module.classifier_forward(train_items, hidden_states)
+                    else:
+                        movie_emb_clean = model.module.classifier_forward(hidden_states)  
+                else:
+                    if vae: 
+                        train_items = item['labels_tr']
+                        movie_emb_clean,mu,logvar = model(data_tensor=train_items, input_ids = item['input_ids'],attention_mask = item['attention_mask'])
+                        
+                    else:
+                        movie_emb_clean = model(**item)[0]
+                                   
+            masked_rows = item['labels_tr'].cpu().numpy() if to_mask is None else to_mask
+            movie_emb_clean[np.where(masked_rows > 0)] = -1e20
+            if logits_rec is not None:
+                logits_rec[np.where(masked_rows > 0)] = -1e20
+                logits_text[np.where(masked_rows > 0)] = -1e20
+
+                recon_rec = logits_rec.float().cpu().numpy()
+                recon_text = logits_text.float().cpu().numpy()
+
+            
+
+            # print(f"{loss_f(movie_emb_clean, labels).item()=}")
+            # print(f"{movie_emb_clean.sum()=}")
             rolling_loss += loss_f(movie_emb_clean, labels).item()
+            # exit()
+
             # movie_emb_clean[np.where(masked_rows > 0)] = -torch.inf
             user_ids_l.append(user_ids)
             recon = movie_emb_clean.float().cpu().numpy()
@@ -222,12 +206,18 @@ def eval_model(model, test_dataloader, rank, test_data_tr,precompute_embeddings,
             labels = labels.cpu().numpy()
             for k in k_values:
                 metrics[f'ndcg@{k}'].append(NDCG_binary_at_k_batch(recon, labels, k=k).tolist())
-                metrics[f'mrr@{k}'].append(MRR_at_k(recon, labels, k=k,mean = False).tolist())
+                # metrics[f'mrr@{k}'].append(MRR_at_k(recon, labels, k=k,mean = False).tolist())
                 metrics[f'recall@{k}'].append(Recall_at_k_batch(recon, labels, k=k,mean = False).tolist())
-
-
-
-
+                #for logits_rect nmow 
+                if logits_rec is not None:
+                    metrics[f'text_ndcg@{k}'].append(NDCG_binary_at_k_batch(recon_text, labels, k=k).tolist())
+                    # metrics[f'mrr@{k}'].append(MRR_at_k(recon_text , labels, k=k,mean = False).tolist())
+                    metrics[f'text_recall@{k}'].append(Recall_at_k_batch(recon_text , labels, k=k,mean = False).tolist())
+                    
+                    metrics[f'rec_ndcg@{k}'].append(NDCG_binary_at_k_batch(recon_rec, labels, k=k).tolist())
+                    # metrics[f'rec_mrr@{k}'].append(MRR_at_k(recon_rec, labels, k=k,mean = False).tolist())
+                    metrics[f'rec_recall@{k}'].append(Recall_at_k_batch(recon_rec, labels, k=k,mean = False).tolist())
+                
 
             
         if mult_process:
@@ -245,7 +235,11 @@ def eval_model(model, test_dataloader, rank, test_data_tr,precompute_embeddings,
             for key in metrics.keys():
                 output_metrics[key] = np.mean(sum(metrics[key],[]))
                 losses = rolling_loss / len(test_dataloader)
-            
+                
+        if logits_rec is not None:
+
+            output_metrics['ndcg@50_avg'] = np.mean([output_metrics['ndcg@50'] ,output_metrics['rec_ndcg@50'],output_metrics['text_ndcg@50']])
+   
     return losses,dict(output_metrics)
 
 
@@ -283,49 +277,60 @@ def pad_tensors(tensor1,tensor2,pad_id):
     
     return torch.cat([tensor1,tensor2])
 
+
 def train_fineTuning(args, rec_dataloader,augmented_dataloader, model, optimizer, scheduler,pbar,epoch,rank,tokenizer,precompute_embeddings):
     rec_dataloader.sampler.set_epoch(epoch)
     loss_f = get_loss(args.loss)
     scaler = torch.cuda.amp.GradScaler()
     rolling_loss = []
+    global update_count
+    
 
     for b, (items,augmented_items) in enumerate(zip(rec_dataloader,augmented_dataloader)):
         model.train()
         
-        with torch.cuda.amp.autocast():
-            if args.mask == 0: 
-                labels = items['labels']
-                input_ids = items['input_ids']
-                attention_mask = items['attention_mask']
-            else:
-                input_ids = pad_tensors(items['input_ids'],augmented_items['input_ids'],tokenizer.pad_token_id)
-                labels = torch.cat((items['labels'],augmented_items['labels']))
-                attention_mask = pad_tensors(items['attention_mask'], augmented_items['attention_mask'], 0)
-            
-            
-            if precompute_embeddings is not None: 
-    
-                hidden_states = [precompute_embeddings[idx.item()] for idx in items['idx'].cpu().numpy()]
+
+        if args.mask == 0: 
+            labels = items['labels']
+            input_ids = items['input_ids']
+            attention_mask = items['attention_mask']
+        else:
+            input_ids = pad_tensors(items['input_ids'],augmented_items['input_ids'],tokenizer.pad_token_id)
+            labels = torch.cat((items['labels'],augmented_items['labels']))
+            attention_mask = pad_tensors(items['attention_mask'], augmented_items['attention_mask'], 0)
         
-                hidden_states = torch.stack(hidden_states).to(rank)
-                movie_emb = model.module.classifier_forward(hidden_states)
-            
+        
+        if precompute_embeddings is not None: 
+
+            hidden_states = [precompute_embeddings[idx.item()] for idx in items['idx'].cpu().numpy()]
     
-            else: 
-                movie_emb = model(input_ids=input_ids.to(rank), attention_mask=attention_mask.to(rank))[0]
-            loss = loss_f(movie_emb, labels.to(rank)) / args.update_every
+            hidden_states = torch.stack(hidden_states).to(rank)
+            movie_emb,mu,logvar = model.module.classifier_forward(hidden_states)
+        
+
+        else: 
+            movie_emb,mu,logvar = model(input_ids=input_ids.to(rank), attention_mask=attention_mask.to(rank))
+        if 200000 > 0:
+            anneal = min(.5,
+                    1. * update_count / 20000)
+        else:
+            anneal = args.anneal_cap
+
+        loss = loss_f(movie_emb, labels.to(rank),mu=mu,logvar = logvar,anneal=anneal) / args.update_every
     
-        scaler.scale(loss).backward()
+        loss.backward()
         
         if (b + 1) % args.update_every == 0:
-            scaler.step(optimizer)
-            scaler.update()
+            
+            optimizer.step()
+            update_count += 1
+
             optimizer.zero_grad(set_to_none=True)
         
         rolling_loss.append(loss.item() * args.update_every)
-
+         
         torch.cuda.empty_cache() 
-        pbar.set_description(f"Epoch {epoch}: Batch: {b} loss: {np.mean(rolling_loss)} current lr: {scheduler.get_last_lr()[0]}")
+        pbar.set_description(f"Epoch {epoch}: Batch: {b} loss: {np.mean(rolling_loss)} current lr: {scheduler.get_last_lr()[0]} beta {anneal}")
 
             
     if not args.debug  :
@@ -339,10 +344,93 @@ def train_fineTuning(args, rec_dataloader,augmented_dataloader, model, optimizer
     pbar.set_description(f"Batch {epoch}: loss: {np.mean(rolling_loss)} current lr: {scheduler.get_last_lr()[0]}")
     scheduler.step()
 
+
+def trainT5Vae(args, rec_dataloader, model, optimizer, scheduler,pbar,epoch,rank,precompute_embeddings):
+    rec_dataloader.sampler.set_epoch(epoch)
+    if 'RecVAE'  in args.embedding_module:
+        loss_f = get_loss('RecVAE_loss',args)
+    elif 'MacridTEARS' in args.embedding_module:
+        loss_f = get_loss('Macrid_loss',args)
+    else:
+        loss_f = get_loss('prior_bce')
+    # scaler = torch.cuda.amp.GradScaler()
+    rolling_loss = []
+    kl_roll = []
+    global update_count
+
+    bces = []
+    klds = []
+    bces_mergeds = []
+    bces_text = []
+    bces_rec = []
+    for b,items in enumerate(rec_dataloader):
+        model.train()
+        labels = items['labels'].to(rank)
+        # print(f"{labels.max(axis =1 )=}")
+        train_items = items['labels_tr'].to(rank)
+        optimizer.zero_grad(set_to_none=True)
+
+        movie_emb, logits_rec, logits_text, mu, logvar, prior_mu, prior_logvar, z_rec, S = model(
+            data_tensor=train_items, input_ids=items['input_ids'], attention_mask=items['attention_mask'])
+
+        if 10000 > 0:
+            anneal = min(.5,
+                 1. * update_count / 10000)
+        else:
+            anneal = args.anneal_cap
+        if 'RecVAE' in  args.embedding_module :
+            try:
+                loss, BCE, wasserstein_loss, BCE_rec, BCE_text, BCE_merged = loss_f(movie_emb,labels,z_rec,mu,logvar,anneal,model.module.vae.modules_to_save['default'].prior,True,
+                            logits_text = logits_text,logits_rec = logits_rec,prior_mu = prior_mu,prior_logvar = prior_logvar,gamma = args.gamma,train_items=train_items,epsilon  = args.epsilon)
+            except:
+
+                loss, BCE, wasserstein_loss, BCE_rec, BCE_text, BCE_merged = loss_f(movie_emb,labels,z_rec,mu,logvar,anneal,model.module.vae.prior,True,
+                            logits_text = logits_text,logits_rec = logits_rec,prior_mu = prior_mu,prior_logvar = prior_logvar,train_items=train_items,epsilon=args.epsilon)
+        
+        elif 'MacridTEARS' in args.embedding_module:
+                loss, BCE, wasserstein_loss, BCE_rec, BCE_text, BCE_merged = loss_f(movie_emb,labels,z_rec,mu,logvar,anneal,model.module.vae,True,
+                            logits_text = logits_text,logits_rec = logits_rec,prior_mu = prior_mu,prior_logvar = prior_logvar,gamma = args.gamma,train_items=train_items,epsilon  = args.epsilon)
+            
+        else:
+            loss, BCE, wasserstein_loss, BCE_rec, BCE_text, BCE_merged = loss_f(movie_emb, logits_rec, logits_text,
+                                             labels, mu, logvar, prior_mu, prior_logvar,
+                                             None, S, anneal,args.epsilon)
+
+        loss.backward()
+        optimizer.step()
+        bces_mergeds.append(BCE_merged.item())
+        bces_text.append(BCE_text.item())
+        bces_rec.append(BCE_rec.item())
+        rolling_loss.append(loss.item())
+        bces.append(BCE.item())
+        klds.append(wasserstein_loss.item())
+        
+        torch.cuda.empty_cache()
+        pbar.set_description(
+            f"Epoch {epoch}: Batch: {b} loss: {np.mean(rolling_loss)} bce: {np.mean(bces)} WL: {np.mean(klds)} current lr: {scheduler.get_last_lr()[0]} BCE_rec: {np.mean(bces_rec)} BCE_text: {np.mean(bces_text)} BCE_merged: {np.mean(bces_mergeds)}")
+        
+        if (b + 1) % args.update_every == 0:    
+            # print(f"{anneal=}")
+            update_count += 1
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+         
+        
+    if not args.debug  :
+        wandb.log({'loss': np.mean(rolling_loss),
+                    "epoch": epoch,
+                    "total_steps": epoch*len(rec_dataloader) + b,
+                    'lr': scheduler.get_last_lr()[0],
+                    })
+        
+    pbar.set_description(f"Batch {epoch}: loss: {np.mean(rolling_loss)} current lr: {scheduler.get_last_lr()[0]}")
+    scheduler.step()
+    
+
 def train_distill(args, rec_dataloader, model, optimizer, scheduler,pbar,epoch,rank,precompute_embeddings):
     rec_dataloader.sampler.set_epoch(epoch)
 
-    loss_f = get_loss(args.loss)
+    loss_f = get_loss(args.loss) if 'RecVAE' not in args.embedding_module else get_loss('RecVAE_loss',args)
     scaler = torch.cuda.amp.GradScaler()
     rolling_loss = []
     kl_roll = []
@@ -350,35 +438,55 @@ def train_distill(args, rec_dataloader, model, optimizer, scheduler,pbar,epoch,r
     global update_count
     update_count = 0
 
-
     for b,items in enumerate(rec_dataloader):
-            model.train()
-            labels = items['labels'].to(rank)
-            train_items = items['labels_tr'].to(rank)
-            optimizer.zero_grad(set_to_none = True )
-            if precompute_embeddings is not None:
-                hidden_states = [precompute_embeddings[idx.item()] for idx in items['idx'].cpu().numpy()]
-                hidden_states = torch.stack(hidden_states).to(rank)
-                movie_emb,mu,logvar = model.module.classifier_forward(train_items, hidden_states)
-                
-            else: 
-                hidden_states = None 
-                movie_emb,mu,logvar = model(data_tensor=train_items, input_ids = items['input_ids'],attention_mask = items['attention_mask'])
-            if 200000 > 0:
-                anneal = min(.5, 
-                            1. * update_count / 20000)
-            else:
-                anneal = args.anneal_cap
-                
-            loss = loss_f(movie_emb,labels,mu,logvar,anneal)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            loss.backward()
-            optimizer.step()
-            rolling_loss.append( loss.item())
-            torch.cuda.empty_cache() 
-            update_count += 1
-            pbar.set_description(f"Epoch {epoch}: Batch: {b} loss: {np.mean(rolling_loss)} current lr: {scheduler.get_last_lr()[0]}")
+        loss = None
+        model.train()
+        labels = items['labels'].to(rank)
+        train_items = items['labels_tr'].to(rank)
+        optimizer.zero_grad(set_to_none = True )
+        # print(f"{labels.sum(axis=1)=}")
+        # print(f"{train_items.sum(axis=1)=}")
 
+
+
+        if 200000 > 0:
+            anneal = min(.5, 
+                        1. * update_count / 20000)
+        else:
+            anneal = args.anneal_cap
+        if precompute_embeddings is not None:
+            hidden_states = [precompute_embeddings[idx.item()] for idx in items['idx'].cpu().numpy()]
+            hidden_states = torch.stack(hidden_states).to(rank)
+            movie_emb,mu,logvar = model.module.classifier_forward(train_items, hidden_states)
+            
+        if args.embedding_module =='MacridVAE':
+            movie_emb,loss = model(train_items,labels,anneal= anneal)
+        elif args.embedding_module == 'RecVAE':
+            movie_emb,loss = model(train_items,labels ,calculate_loss = True)
+        
+        else: 
+            hidden_states = None 
+            movie_emb,mu,logvar = model(data_tensor=train_items, input_ids = items['input_ids'],attention_mask = items['attention_mask'])
+
+        if loss is  None:
+            if args.embedding_module == 'RecVAE':
+                loss = loss_f(movie_emb,labels,z,mu,logvar,anneal,model.module.prior,gamma = args.gamma,train_items = train_items)
+            else: 
+                loss = loss_f(movie_emb,labels,mu,logvar,anneal)
+
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        #if the loss is nan break 
+        # if torch.isnan(loss):
+        #     exit()
+        loss.backward()
+        optimizer.step()
+        rolling_loss.append( loss.item())
+        # torch.cuda.empty_cache() 
+        update_count += 1
+        pbar.set_description(f"Epoch {epoch}: Batch: {b} loss: {np.mean(rolling_loss)} current lr: {scheduler.get_last_lr()[0]}")
+        
+            
+        scheduler.step()
 
     if not args.debug  :
 
@@ -389,7 +497,6 @@ def train_distill(args, rec_dataloader, model, optimizer, scheduler,pbar,epoch,r
                     })
         
     pbar.set_description(f"Batch {epoch}: loss: {np.mean(rolling_loss)} current lr: {scheduler.get_last_lr()[0]}")
-    scheduler.step()
 
 def get_eos_token(prompts):
     # Find the indices of non-zero elements
@@ -420,12 +527,13 @@ def parse_args(notebook = False):  # Parse command line arguments
     parser.add_argument("--log_file", default= 'model_logs/ml-100k/logging_llmMF.csv', type=str)
     parser.add_argument("--model_name", default='Transformer', type=str)
     parser.add_argument("--emb_type", default='attn', type=str)
-
     parser.add_argument("--save_teacher_path", default='./vae/', type=str)
     parser.add_argument("--embedding_module", default="microsoft/phi-2", type=str)
     parser.add_argument("--scheduler", default='linear_decay', type=str)
+    parser.add_argument("--regularization_type", default='OT', type=str)
     parser.add_argument("--embedding_dim" , default=1536, type=int)
     parser.add_argument("--bs" , default=8, type=int)
+    parser.add_argument("--seed" , default=2024, type=int)
     parser.add_argument("--patience" , default=100, type=int)
     parser.add_argument("--output_emb" , default=256, type=int)
     parser.add_argument("--top_for_rerank" , default=50, type=int)
@@ -440,17 +548,26 @@ def parse_args(notebook = False):  # Parse command line arguments
     parser.add_argument("--num_neg", default=1, type=int)
     parser.add_argument("--num_heads", default=4, type=int)
     parser.add_argument("--lr", default=.0001, type=float)
+    parser.add_argument("--epsilon", default=1, type=float)
+    parser.add_argument("--tau", default=1, type=float)
     parser.add_argument("--lr2", default=.00001, type=float)
+    parser.add_argument("--gamma", default=.0035, type=float)
+    parser.add_argument("--kfac", default=10, type=int)
+    parser.add_argument("--dfac", default=100, type=int)
     parser.add_argument("--l2_lambda", default=.0001, type=float)
     parser.add_argument("--mask", default=0 , type=float)
     parser.add_argument("--dropout", default=.1, type=float)
+    parser.add_argument("--keep_prob", default=.5, type=float)
     parser.add_argument("--temp", default=2, type=float)
     parser.add_argument("--anneal", default=True, type=bool)
     parser.add_argument("--masked_and_original", action = 'store_true')
     parser.add_argument("--wd", default=0, type=float)
     parser.add_argument('--make_embeddings', action='store_true')
     parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--DAE', action='store_true')
     parser.add_argument('--debugger', action='store_true')
+    parser.add_argument('--std', type=float, default=0.075,
+                 help='Standard deviation of the Gaussian prior.')
     parser.add_argument('--cosine', action='store_true')
     parser.add_argument('--make_augmented', action='store_true')
     parser.add_argument('--neg_sample', action='store_true')
@@ -462,13 +579,21 @@ def parse_args(notebook = False):  # Parse command line arguments
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--total_steps", type=int, default=1)
     parser.add_argument("--beta", type=float, default=1)
-    
     parser.add_argument("--lora_alpha", type=int, default=16)
+
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument('--no_bias', action='store_true')
+    parser.add_argument('--train_encoder', action='store_true')
+    parser.add_argument('--concat', action='store_true')
     parser.add_argument('--binarize', action='store_true')
     parser.add_argument('--eval_control', action='store_true')
     parser.add_argument('--debug_prompts', action='store_true')
+    parser.add_argument('--EASE', action='store_true')
+    parser.add_argument('--no_merged', action='store_true')
+    parser.add_argument('--no_text', action='store_true')
+    parser.add_argument('--no_rec', action='store_true')
+    parser.add_argument('--nogb', action='store_true')
+    parser.add_argument('--KLD', action='store_true')
     parser.add_argument('--mask_control_labels', action='store_true')
 
     args = parser.parse_args() if not notebook else parser.parse_args(args=[])
@@ -480,10 +605,10 @@ def parse_args(notebook = False):  # Parse command line arguments
     args.model_save_name = f"{args.model_save_path}/best_model_lr_{args.lr}_embedding_module_{args.embedding_module.replace('/','_')}_epochs_{args.epochs}_l2_lambda_{args.l2_lambda}_lora_alpha_{args.lora_alpha}_lora_r_{args.lora_r}_{args.loss}__bias_{args.no_bias}.pth"
     print(f"MODEL NAME = {args.model_save_name}")
 
-    args.model_log_name = f"{args.model_name}_embedding_module_{args.embedding_module.replace('/','_')}_l2_lambda_{args.l2_lambda}_lora_r_{args.lora_r}_scheduler_{args.scheduler}_{args.lr}_{args.dropout}.csv"
+    current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    args.model_log_name = f"{args.model_name}_{args.data_name}_embedding_module_{args.embedding_module.replace('/','_')}_{current_time}.csv"
     print(f"{args.model_log_name=}")
 
-    
     directory_path = "./scratch"
 
     if os.path.exists(directory_path) and os.path.isdir(directory_path):
