@@ -1,4 +1,6 @@
 import json
+import ast
+
 import pandas as pd 
 import pickle
 import numpy as np
@@ -331,7 +333,7 @@ class MatrixDataLoader():
         if datatype == 'train':
             return self._load_train_data(head = head)
         elif datatype == 'validation':
-            return self._load_tr_te_data(datatype)
+            return self._load_tr_te_data(datatype,head = head)
         elif datatype == 'test':
             return self._load_tr_te_data(datatype,head=head)
         else:
@@ -347,12 +349,11 @@ class MatrixDataLoader():
     
     def _load_train_data(self,head = 50):
         if head is not None:
-            path = os.path.join(self.pro_dir, 'train.csv',head = head)
+            path = os.path.join(self.pro_dir, 'train.csv')
         else: 
             path = os.path.join(self.pro_dir, 'train.csv')
             
         tp = pd.read_csv(path)
-        print(f"{tp=}")
         self.n_users = tp['uid'].max() + 1
 
         
@@ -380,8 +381,12 @@ class MatrixDataLoader():
 
         if head is not None:
             tp_tr = pd.concat([tp_tr,tp_te])
-
-            tp_tr_head = tp_tr.groupby('uid').apply(lambda x: x.head(50)).reset_index(drop=True)
+            # print(f"{tp_tr.groupby('uid').size()=}")
+            # print(f"{tp_tr=}")
+            grouped_test = tp_tr.groupby('uid').count()
+            user_set = grouped_test[grouped_test['sid'] > 100].index
+            tp_tr = tp_tr[tp_tr.uid.isin(user_set)]
+            tp_tr_head = tp_tr.groupby('uid').apply(lambda x: x.head(100)).reset_index(drop=True)
 
             # Step 2: Find the indices of the rows that are not in the top 100 for each group and update tp_te
             # First, we'll get the indices of tp_tr_head to exclude them from tp_tr
@@ -389,12 +394,17 @@ class MatrixDataLoader():
 
             # Now, select rows in tp_tr that are not in tp_tr_head
             tp_te = tp_tr.loc[~tp_tr.index.isin(indices_to_exclude)]
-            print(f"{tp_te.groupby('uid').size()=}")
-            raise Exception
+            # print(f"{tp_te.groupby('uid').size()=}")
+            
 
             # Update tp_tr to be just the head
 
             tp_tr = tp_tr.groupby('uid').apply(lambda x: x.head(head)).reset_index(drop=True)
+            # print(f"{head=}")
+            tp_tr = tp_tr[tp_tr.uid.isin(tp_te.uid.unique())]
+            # print(f"{tp_tr.groupby('uid').size()=}")
+            # print(f"{len(tp_tr.uid.unique())=}")
+            # print(f"{len(tp_te.uid.unique())=}")
 
 
 
@@ -409,7 +419,9 @@ class MatrixDataLoader():
                                     (rows_tr, cols_tr)), dtype='float64', shape=(self.n_users, self.n_items))
         data_te = sparse.csr_matrix((np.ones_like(rows_te) ,
                                     (rows_te, cols_te)), dtype='float64', shape=(self.n_users, self.n_items))
-
+        # data_tr = data_tr[data_tr.sum(axis=1).nonzero()[0]]
+        # print(f"{(data_tr>0).sum(axis =1 )=}")
+        # print(f"{data_tr.sum(axis =1 ).shape=}")
         return data_tr, data_te
 
 def naive_sparse2tensor(data):
@@ -448,9 +460,20 @@ def map_id_to_title(data = 'ml-1m'):
             item_id_map = pickle.load(f)
         return item_id_map
 
-    elif data == 'books': 
-        df = pd.read_csv(data_file)
-        return df.set_index('sid').to_dict()['title']
+    elif data =='goodbooks': 
+        df = pd.read_csv('/home/mila/e/emiliano.penaloza/LLM4REC/data/goodbooks/genres.csv')
+        df.genres = df.genres.apply(ast.literal_eval)
+
+        mapping = {}
+        with open('/home/mila/e/emiliano.penaloza/LLM4REC/data_preprocessed/goodbooks/show2id.pkl','rb') as f :
+            item_id_map = pickle.load(f)
+        for index, row in df.iterrows():
+            if row['book_id'] in item_id_map:
+                    mapping[item_id_map[row['book_id']]] = row['title']
+
+
+
+    return mapping
         
         
         
@@ -467,10 +490,10 @@ def map_id_to_genre(data='ml-1m'):
             #item may have been removed at post processing so check if it was
             if row['itemId'] in item_id_map:
 
-                genres = row['genre'].split('|')
+                genres = row['genre'].lower().replace('-', ' ').split('|')
                 mapping[item_id_map[row['itemId']]] = genres
 
-        return mapping
+
     elif data=='netflix':
         
         with open('/home/mila/e/emiliano.penaloza/LLM4REC/data_preprocessed/netflix/show2id.pkl','rb') as f :
@@ -483,12 +506,20 @@ def map_id_to_genre(data='ml-1m'):
 
         for index, row in df.iterrows():
             if row['movieId'] in item_id_map:
-                mapping[item_id_map[row['movieId']]] = row['genres'].split('|')
-        return mapping
+                mapping[item_id_map[row['movieId']]] = row['genres'].lower().replace('-', ' ').split('|')
         
-    elif data =='books': 
-        df = pd.read_csv(path)
-        return df.set_index('sid').to_dict()['genres']
+    elif data =='goodbooks': 
+        df = pd.read_csv('/home/mila/e/emiliano.penaloza/LLM4REC/data/goodbooks/genres.csv')
+        df.genres = df.genres.apply(ast.literal_eval)
+
+        mapping = {}
+        with open('/home/mila/e/emiliano.penaloza/LLM4REC/data_preprocessed/goodbooks/show2id.pkl','rb') as f :
+            item_id_map = pickle.load(f)
+        for index, row in df.iterrows():
+            if row['book_id'] in item_id_map:
+                    mapping[item_id_map[row['book_id']]] = row['genres']
 
 
+
+    return mapping
   
