@@ -32,7 +32,6 @@ parser.add_argument("--books", action='store_true', help="Whether to run in book
 args = parser.parse_args()
 train_data = f'../data_preprocessed/{args.data_name}/prompt_set_timestamped.csv'
 
- 
 openai.api_key = key
 
 
@@ -103,6 +102,10 @@ def generate_prompts_recent_books(train_data,num_movies = 30):
                 
             prompt += f'\nRating: {rating}\n'
             prompt += f'\Authors: {author}\n'
+            
+        prompt += 'Do not comment on the ratings or specific titles but use qualitative speech such as the user likes, or the user does not enjoy\n'
+        prompt += 'Do not comment mention any author names\n'
+
         prompts[id] = prompt    
    
     return prompts
@@ -122,7 +125,7 @@ if __name__ == "__main__":
 
     else:
         prompt = "Task: You will now help me generate a highly detailed summary based on the broad common elements of books.\n"
-        prompt += "Do not comment on the year of release. Do not mention any specific book titles or actors.\n"
+        prompt += "Do not comment on the year of release. Do not mention any specific book titles or authors.\n"
         prompt += 'Do not comment on the ratings but use qualitative speech such as the user likes, or the user does not enjoy\n'
         prompt += 'Remember you are an expert crafter of these summaries so any other expert should be able to craft a similar summary to yours given this task\n'
         prompt += "Keep the summary short at about 200 words. The summary should have the following format:\n"

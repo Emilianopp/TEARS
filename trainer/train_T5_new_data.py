@@ -8,7 +8,6 @@ os.environ['TORCH_HOME'] = '/home/mila/e/emiliano.penaloza/scratch/models'
 from trainer.transformer_utilts import load_data,train_fineTuning,eval_model,get_scheduler,get_loss, get_embeddings,parse_args,eval_model
 sys.path.append("..")
 import torch.optim as optim
-
 from tqdm import tqdm
 import pandas as pd
 import time 
@@ -28,6 +27,8 @@ from transformers import AutoModel
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_flash_sdp(False)
 import os
+from model.eval_model import LargeScaleEvaluator
+
 
 
 
@@ -81,96 +82,21 @@ def train_fun(rank,world_size):
         wandb.define_metric("lr", step_metric="epochs")
 
     torch.cuda.set_device(rank)
-    
-    
-    # if args.embedding_module == 'google-t5/t5-3b':
-    #     tokenizer = T5Tokenizer.from_pretrained('google-t5/t5-3b')
-    # else: 
-    #     tokenizer = AutoTokenizer.from_pretrained(args.embedding_module,padding_side= 'left' if args.embedding_module == 'google-t5/t5-3b' else "right",
-    #                                            add_eos_token=False if args.embedding_module == 'google-t5/t5-3b' else True,  
-    #                                            add_bos_token=False if args.embedding_module == 'google-t5/t5-3b' else True,
-    #                                            use_fast=True if args.embedding_module == 'google-t5/t5-3b' else False)
-    
-    
-    #     tokenizer.pad_token = tokenizer.eos_token
-    # # if tokenizer.pad_token is None:
-    # #     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
- 
-    # prompts,rec_dataloader,augmented_dataloader,num_movies,val_dataloader,test_dataloader,val_data_tr,test_data_tr,non_bin_dataloader= load_data(args,tokenizer,rank,world_size)
-    
-    # if args.embedding_module == 'google-t5/t5-3b':
-    #     model = sentenceT5Classification.from_pretrained('google-t5/t5-3b', num_labels=num_movies, classifier_dropout = args.dropout)
-    #     lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
-    #                             target_modules=['q','v','k'],
-    #                             modules_to_save=['classifier'])
-    #     model = get_peft_model(model, lora_config)
-    # if args.embedding_module == "microsoft/phi-2":
-    #     configuration = AutoConfig.from_pretrained(args.embedding_module)
-    #     configuration.dropout = args.dropout
-    #     configuration.num_labels = num_movies  # Set the number of labels here
-    #     model = PhiForSequenceClassification.from_pretrained(args.embedding_module, torch_dtype=torch.float32, config=configuration)
-    #     lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
-    #                             target_modules=["q_proj", "k_proj", "v_proj"],
-                                
-    #                             modules_to_save=['score'])
-    #     model = get_peft_model(model, lora_config)
-        
-    #     model.config.pad_token_id = tokenizer.pad_token_id
-
-    #     # model.resize_token_embeddings(len(tokenizer))
-
-    #     if args.warmup> 0 :
-    #             for name, param in model.named_parameters():
-    #                 if 'lora' in name:
-    #                     param.requires_grad = False
-
-    # if args.embedding_module == "McGill-NLP/LLM2Vec-Mistral-7B-Instruct-v2-mntp":        
-    #     tokenizer = AutoTokenizer.from_pretrained(args.embedding_module)
-
-    #     config = AutoConfig.from_pretrained(args.embedding_module, trust_remote_code=True)
-    #     model = AutoModel.from_pretrained(
-    #         args.embedding_module,
-    #         trust_remote_code=True,
-    #         config=config,
-    #         torch_dtype=torch.bfloat16,
-    #         device_map="cuda" if torch.cuda.is_available() else "cpu",
-    #     )
-    #     model = PeftModel.from_pretrained(
-    #         model,
-    #         "McGill-NLP/LLM2Vec-Mistral-7B-Instruct-v2-mntp"
-    #     )
-    #     model = model.merge_and_unload()  # This can take several minutes on cpu
-        
-    #     model = PeftModel.from_pretrained(
-    #         model, "McGill-NLP/LLM2Vec-Mistral-7B-Instruct-v2-mntp-unsup-simcse"
-    #     )
-
-    #     model_config = model.config
-    #     model = MistralClassifier(model, num_movies, args.dropout,config,pooling_mode = args.pooling,tokenizer = tokenizer)
-    #     lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
-    #                             target_modules=["q_proj", "k_proj", "v_proj"],
-                                
-    #                             modules_to_save=['classifier'])
-    
-    # elif args.embedding_module == 't5_frozen':
-    #     model = sentenceT5ClassificationFrozen.from_pretrained('t5-large', num_labels=num_movies, classifier_dropout=args.dropout)
-    #     for name, param in model.named_parameters():
-    #         if 'classification_head' not in name:
-    #             param.requires_grad = False
     tokenizer = get_tokenizer(args)
-    prompts,rec_dataloader,augmented_dataloader,num_movies,val_dataloader,test_dataloader,val_data_tr,test_data_tr,non_bin_dataloader= load_data(args,tokenizer,rank,world_size)
-    model,lora_config = get_model(args, tokenizer, num_movies, rank, world_size).to(rank)
+    prompts,rec_dataloader,augmented_dataloader,num_movies,val_dataloader,test_dataloader,val_data_tr,test_data_tr= load_data(args,tokenizer,rank,world_size)
+    model,lora_config = get_model(args, tokenizer, num_movies, rank, world_size)
+    model.to(rank)
     
-    if args.warmup > 0 and args.mask == 0:
+    if args.warmup > 0 and args.mask == 0 and args.embedding_module != 'VAE':
         dir_name = args.scratch + '/' + args.embedding_module.replace('/','_') + f"/{args.data_name}/"
         if not os.path.exists(dir_name):
             os.makedirs(dir_name)
-        precomputed_embeddings = get_embeddings(model, rec_dataloader, rank, world_size, num_movies, tokenizer, save_path= dir_name , save_name= 'embeddings.pkl', save=True)
-        val_embeddings = get_embeddings(model, val_dataloader, rank, world_size, num_movies, tokenizer, save_path= dir_name , save_name= 'val_embeddings.pkl', save=True)
-        test_embeddings = get_embeddings(model, test_dataloader, rank, world_size, num_movies, tokenizer, save_path= dir_name , save_name= 'test_embeddings.pkl', save=True)
+        precomputed_embeddings = get_embeddings(model, rec_dataloader, rank, world_size, num_movies, tokenizer, save_path= dir_name , save_name= 'embeddings.pkl', save=True,bfloat16 = False if args.embedding_module == 'google-t5/t5-3b' else True)
+        val_embeddings = get_embeddings(model, val_dataloader, rank, world_size, num_movies, tokenizer, save_path= dir_name , save_name= 'val_embeddings.pkl', save=True,bfloat16 = False if args.embedding_module == 'google-t5/t5-3b' else True)
+        test_embeddings = get_embeddings(model, test_dataloader, rank, world_size, num_movies, tokenizer, save_path= dir_name , save_name= 'test_embeddings.pkl', save=True,bfloat16 = False if args.embedding_module == 'google-t5/t5-3b' else True)
     else:
         precomputed_embeddings = None
-                
+            
     model = get_peft_model(model, lora_config)           
     
     if args.warmup> 0 :
@@ -192,7 +118,10 @@ def train_fun(rank,world_size):
     patience_counter = 0
     last_saved_epoch = 0
     loss_f = get_loss(args.loss)
-    val_recall = 0
+    item_title_dict = map_id_to_title(args.data_name)
+    item_genre_dict = map_id_to_genre(args.data_name)
+    large_change_evaluator = LargeScaleEvaluator(model,item_title_dict,item_genre_dict,tokenizer, rank,args)
+
     
 
     enabled_lora = False
@@ -207,6 +136,7 @@ def train_fun(rank,world_size):
             params = [p for p in model.parameters() if p.requires_grad]
             optimizer = optim.AdamW(params, lr=args.lr2,weight_decay=args.l2_lambda)
             scheduler = get_scheduler(optimizer, args)
+            precomputed_embeddings = val_embeddings = test_embeddings  = None 
             
             enabled_lora = True
         
@@ -214,33 +144,43 @@ def train_fun(rank,world_size):
         if e % 1 == 0: 
             torch.cuda.set_device(rank)
 
-            val_loss,outputs = eval_model(model,val_dataloader,rank,val_data_tr,val_embeddings if e < args.warmup else None ,loss_f = loss_f,world_size = world_size)
+            val_loss,outputs = eval_model(args,model,val_dataloader,rank,val_data_tr,val_embeddings if e < args.warmup else None ,loss_f = loss_f,world_size = world_size)
             if not args.debug :
-                wandb.log({'val_ndcg@20': outputs['ndcg@20'],
-                            'val_recall@20': outputs['recall@20'],
-                            'val_ndcg@50': outputs['ndcg@50'],
-                            'val_recall@50': outputs['recall@50'],
-                            'validation_loss': val_loss,
-                            'epoch': e})
+                val_outputs = {f'val_{k}': v for k,v in outputs.items()}
+                wandb.log({**val_outputs,'validation_loss': val_loss})
+
+        if args.eval_control:
+            if world_size > 1:
+                    all_up = [None for _ in range(world_size)]
+                    all_down = [None for _ in range(world_size)]
+                    delta_up, delta_down = large_change_evaluator.evaluate(val_dataloader, prompts, 20,rank = rank)
+                    dist.all_gather_object(all_up, delta_up)
+                    dist.all_gather_object(all_down, delta_down)
+
+                    delta_up = np.mean(all_up)
+                    delta_down = np.mean(all_down)
+            else:
+                    delta_up, delta_down = large_change_evaluator.evaluate(val_dataloader, prompts, 20,rank = rank) 
+            
+            wandb.log({'delta_up': delta_up})
+            wandb.log({'delta_down': delta_down})
 
             if outputs['ndcg@50'] > min_val_recall:
                 min_val_recall = outputs['ndcg@50']
                 best_e = e 
+
+                # torch.save(model.module.state_dict(), f'{args.scratch}/saved_model/{args.data_name}/{args.model_log_name}.pt')
+                best_model = model.module.state_dict()
                 torch.save(model.module.state_dict(), f'{args.scratch}/saved_model/{args.data_name}/{args.model_log_name}.pt')
+                
                 last_saved_epoch = e
                 wandb.log({'ndcg@50_max': min_val_recall})
                 wandb.log({'last_saved_epoch': last_saved_epoch})
                 print(f"Early stopping training at epoch {e}")
-                test_loss,test_outputs = eval_model(model,test_dataloader,rank,test_data_tr ,test_embeddings if e < args.warmup else None,loss_f = loss_f,world_size = world_size)
-                wandb.log({'test_recall@10': test_outputs['recall@10'],
-                        'test_recall@20': test_outputs['recall@20'],
-                        'test_recall@50': test_outputs['recall@50'],
-                        'test_ndcg@10': test_outputs['ndcg@10'],
-                        'test_ndcg@20': test_outputs['ndcg@20'],
-                        'test_ndcg@50': test_outputs['ndcg@50'],
-                        'test_MRR@10': test_outputs['mrr@10'],
-                        'test_MRR@20': test_outputs['mrr@20'],
-                        'test_MRR@50': test_outputs['mrr@50']})
+                test_loss,test_outputs = eval_model(args,model,test_dataloader,rank,test_data_tr ,test_embeddings if e < args.warmup else None,loss_f = loss_f,world_size = world_size)
+                test_outputs = {f'test_{k}': v for k,v in test_outputs.items()}
+                
+                wandb.log({**test_outputs})
 
                 if args.patience == patience_counter:
                     print(f"Early stopping training at epoch {e}")
@@ -249,12 +189,14 @@ def train_fun(rank,world_size):
 
             pbar.set_postfix({'val_loss': val_loss,'val_ndcg': outputs['ndcg@50'],'recall': outputs['recall@50'],'last_saved_epoch': last_saved_epoch})
             
-    model.module.load_state_dict(torch.load(f'{args.scratch}/saved_model/{args.data_name}/{args.model_log_name}.pt'))
+    model.module.load_state_dict(best_model)
+    torch.save(model.module.state_dict(), f'{args.scratch}/saved_model/{args.data_name}/{args.model_log_name}.pt')
     model.to(rank)
 
-    val_loss,val_outputs =eval_model(model,val_dataloader,rank,val_data_tr, val_embeddings if best_e < args.warmup else None ,loss_f = loss_f,world_size = world_size)
+    val_loss,val_outputs =eval_model(args,model,val_dataloader,rank,val_data_tr, val_embeddings if best_e < args.warmup else None ,loss_f = loss_f,world_size = world_size)
 
-    test_loss,test_outputs = eval_model(model,test_dataloader,rank,test_data_tr,test_embeddings if best_e < args.warmup else None,loss_f = loss_f,world_size = world_size)
+    test_loss,test_outputs = eval_model(args,model,test_dataloader,rank,test_data_tr,test_embeddings if best_e < args.warmup else None,loss_f = loss_f,world_size = world_size)
+    test_outputs = {f'test_{k}': v for k,v in test_outputs.items()}
     
     wandb.log({'test_recall@10': test_outputs['recall@10'],
                'test_recall@20': test_outputs['recall@20'],
@@ -265,7 +207,6 @@ def train_fun(rank,world_size):
                'test_MRR@10': test_outputs['mrr@10'],
                'test_MRR@20': test_outputs['mrr@20'],
                'test_MRR@50': test_outputs['mrr@50']})
-    
     end_time = time.time()
     elapsed_time = end_time - start_time
     print(f"Elapsed Time: {elapsed_time} seconds")

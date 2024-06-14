@@ -206,6 +206,9 @@ if __name__ == "__main__":
     elif data_name == 'goodbooks':
         ratings_file = '../data/goodbooks/ratings.csv'
         ratings = pd.read_csv(ratings_file)
+        #remove cold start items
+        ratings = ratings[ratings['book_id'].isin(ratings['book_id'].value_counts()[ratings['book_id'].value_counts()>10].index)]
+        
         ratings.rename(columns={'book_id':'itemId','Title':'title','user_id':'userId'}, inplace=True)
         valid_item_names = ratings.title.unique().tolist()
         #rename the bookId column to itemId

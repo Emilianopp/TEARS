@@ -28,13 +28,15 @@ global_path = '/home/mila/e/emiliano.penaloza/LLM4REC'
 load_dotenv()
 key = os.getenv("OPEN-AI-SECRET")
 parser = ArgumentParser(description="Your script description here")
-parser.add_argument("--train_data", default="./data_preprocessed/ml-1m/prompt_set_timestamped.csv", help="Path to the training data CSV file")
-parser.add_argument("--test_data", default="./data_preprocessed/ml-1m/strong_generalization_set_timestamped.csv", help="Path to the training data CSV file")
 parser.add_argument("--gpt_version", default="gpt-4-1106-preview", help="GPT model version")
 parser.add_argument("--max_tokens", type=int, default=300, help="Maximum number of tokens for the response")
-parser.add_argument("--num_samples", type=int, default=1, help="Maximum number of tokens for the response")
-parser.add_argument("--num_movies", type=int, default=70, help="Maximum number of tokens for the response")
 parser.add_argument("--debug", action='store_true', help="Whether to run in debug mode")
+parser.add_argument("--data_name", default = 'ml-1m', help="Name of the dataset to use")
+parser.add_argument("--save_path", default = '', help="Name of the dataset to use")
+parser.add_argument("--books", action='store_true', help="Whether to run in books prompt")
+
+args = parser.parse_args()
+train_data = f'../data_preprocessed/{args.data_name}/prompt_set_timestamped.csv'
 args = parser.parse_args()
 
 openai.api_key = key

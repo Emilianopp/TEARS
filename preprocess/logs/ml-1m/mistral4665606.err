@@ -1,0 +1,6 @@
+/var/spool/slurmd/job4665606/slurm_script: line 18: syntax error near unexpected token `('
+/var/spool/slurmd/job4665606/slurm_script: line 18: `dropout_index=$sh((SLURM_ARRAY_TASK_ID / 3 % 3))'
+/etc/slurm/slurmtask_epilog: line 26: ${OUT_FILE}: ambiguous redirect
+/etc/slurm/slurmtask_epilog: line 27: ${OUT_FILE}: ambiguous redirect
+/etc/slurm/slurmtask_epilog: line 28: ${OUT_FILE}: ambiguous redirect
+slurmstepd: error: --task-epilog failed status=1

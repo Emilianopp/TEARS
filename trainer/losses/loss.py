@@ -134,7 +134,7 @@ class RecVAE_loss(nn.Module):
             
             if tears:
                 if not self.args.no_merged:
-                    BCE_merged = -torch.mean(torch.mean(F.log_softmax(recon_x, 1) * x, -1))
+                    BCE_merged = -torch.mean(torch.mean(F.log_softmax(recon_x, 1) * x, -1)) 
                 else:
                     BCE_merged = torch.tensor(0).to(logits_rec.device)
                 if not self.args.no_text:
@@ -147,7 +147,7 @@ class RecVAE_loss(nn.Module):
                     BCE_rec = torch.tensor(0).to(logits_rec.device)
 
                 
-                BCE = (1/3)*(BCE_merged + BCE_text + BCE_rec)
+                BCE = (1/3)*(BCE_merged * self.args.recon_tau + BCE_text*self.args.text_tau + BCE_rec*self.args.rec_tau)
                 
                 if not self.args.KLD:
                     KLD1 = -0.5 * torch.mean(torch.mean(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
@@ -160,6 +160,7 @@ class RecVAE_loss(nn.Module):
                 # KLD2 = -0.5 * torch.mean(torch.mean(1 + prior_logvar - prior_mu.pow(2) - prior_logvar.exp(), dim=1))
 
                 sigma2 = torch.exp(logvar)
+
                 sigma2_prior = torch.exp(prior_logvar)
                 sigma2_diag = torch.stack([torch.diag(v) for v in sigma2])
                 sigma2_prior_diag = torch.stack([torch.diag(v) for v in sigma2_prior])
@@ -185,6 +186,12 @@ class RecVAE_loss(nn.Module):
         mean_dist_squared = torch.sum(mean_diff ** 2, dim=1)  # Sum over columns to get a vector of shape (b,)
 
         # Cholesky decomposition of covs1 in batch
+        #add small value to avoid singular matrix
+        # covs1 = covs1 
+        # print(f"{covs1.shape=}")
+        # print(f"{covs1=}")
+        # exit()
+  
         sqrt_covs1 = torch.linalg.cholesky(covs1)
 
         # Batch matrix product: sqrt_covs1 * covs2 * sqrt_covs1

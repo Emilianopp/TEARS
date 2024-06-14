@@ -10,7 +10,7 @@ from collections import Counter
 import os
 from torch.nn.parallel import DistributedDataParallel
 class LargeScaleEvaluator(nn.Module):
-    def __init__(self,model,item_title_dict,item_genre_dict,tokenizer,rank,args,alpha = .5):
+    def __init__(self,model,item_title_dict,item_genre_dict,tokenizer,rank,args,alpha = .5,split='test'):
         super().__init__()
         self.model = model
         self.item_title_dict = item_title_dict
@@ -22,10 +22,13 @@ class LargeScaleEvaluator(nn.Module):
         #keep counts if above 200 
         self.counts = {k:v for k,v in counts.items() if v > 100}
         self.genre_list = list(self.counts.keys())
+        # if args.data_name == 'goodbooks':
+        self.genre_list = [x.lower().replace('-', ' ') for x in self.genre_list]
+        
         self.genre_set = ', '.join(self.genre_list)
         self.args = args
-        if os.path.exists(f'./results/{self.args.data_name}/gpt4_results_large_genre_test.csv'):
-            self.df = pd.read_csv(f'./results/{self.args.data_name}/gpt4_results_large_genre_test.csv')
+        if os.path.exists(f'./results/{self.args.data_name}/gpt4_results_large_genre_{split}.csv'):
+            self.df = pd.read_csv(f'./results/{self.args.data_name}/gpt4_results_large_genre_{split}.csv')
 
 
         self.alpha = alpha 
@@ -40,14 +43,26 @@ class LargeScaleEvaluator(nn.Module):
             labels = torch.zeros_like(labels)
         # labels = torch.zeros_like(labels)
         # print(f"{labels.sum()=}")
-        if isinstance(self.model, DistributedDataParallel):
-            topk1 = self.model.module.generate_recommendations(s1, self.tokenizer, labels, topk, rank,alpha = self.alpha,neg = neg)
-            topk2 = self.model.module.generate_recommendations(s2, self.tokenizer, labels, topk, rank,alpha = self.alpha if self.alpha2 is not None else self.alpha2,neg = neg)
+        if  self.args.embedding_module not in  ['RecVAEGenreVAE','GenreTEARS']:
+            if isinstance(self.model, DistributedDataParallel):
+                topk1 = self.model.module.generate_recommendations(s1, self.tokenizer, labels, topk, rank,alpha = self.alpha,neg = neg)
+                topk2 = self.model.module.generate_recommendations(s2, self.tokenizer, labels, topk, rank,alpha = self.alpha if self.alpha2 is not None else self.alpha2,neg = neg)
 
-        else:
-            topk1 = self.model.generate_recommendations(s1, self.tokenizer, labels, topk, rank,alpha = self.alpha,neg =neg)
-            
-            topk2 = self.model.generate_recommendations(s2, self.tokenizer, labels, topk, rank,alpha = self.alpha if self.alpha2 is not None else self.alpha2,neg = neg)
+            else:
+                topk1 = self.model.generate_recommendations(s1, self.tokenizer, labels, topk, rank,alpha = self.alpha,neg =neg)
+                
+                topk2 = self.model.generate_recommendations(s2, self.tokenizer, labels, topk, rank,alpha = self.alpha if self.alpha2 is not None else self.alpha2,neg = neg)
+        else: 
+            if isinstance(self.model, DistributedDataParallel):
+                topk1 = self.model.module.generate_recommendations(  topk =topk, rank=rank,alpha = self.alpha,neg = neg)
+                topk2 = self.model.module.generate_recommendations(mask_genre = genre_2, topk = topk, rank =rank,alpha = self.alpha if self.alpha2 is not None else self.alpha2,neg = neg)
+
+            else:
+                topk1 = self.model.generate_recommendations( data_tensor = labels,topk =topk, rank=rank,alpha = self.alpha,neg = neg)
+
+                
+                topk2 = self.model.generate_recommendations(data_tensor = labels,mask_genre = genre_2, topk = topk, rank =rank,alpha = self.alpha if self.alpha2 is not None else self.alpha2,neg = neg)
+
 
         movie_titles1 = [self.item_title_dict[i] for i in topk1]
         movie_titles2 = [self.item_title_dict[i] for i in topk2]
@@ -86,8 +101,11 @@ class LargeScaleEvaluator(nn.Module):
         np.random.seed(seed)
         # self.model.eval()
         load_dotenv()
-        
-        
+
+        self.genre_list = [x.lower().replace('-', ' ') for x in self.genre_list]
+
+        print(f"{self.genre_list=}")
+        c = 0
         openai.api_key  = os.getenv("OPEN-AI-SECRET")
         move_up_genres =[]
         move_down_genres = []
@@ -111,6 +129,7 @@ class LargeScaleEvaluator(nn.Module):
                         Please identify the users most favorite genre from the following summary and the least favorite genre: 
                         in the format Favorite: [genre]\n Least Favorite: [genre]
                         {s}.
+                        Remember the genre you pick must be in this set of genres {self.genre_set} and in the format Favorite: [genre]\n Least Favorite: [genre]
                         """
                         
             msg = [
@@ -126,7 +145,8 @@ class LargeScaleEvaluator(nn.Module):
                     ]
 
             genres = openai.ChatCompletion.create(
-                            model='gpt-4-1106-preview',
+                            model='gpt-4o',
+                            # model='gpt-4o',
                             messages=msg,
                             max_tokens=300,
                             temperature=0.001,
@@ -134,11 +154,14 @@ class LargeScaleEvaluator(nn.Module):
                         )['choices'][0]['message']['content']
             lines = genres.split('\n')
             try:
-                favorite_genre = lines[0].split(': ')[1]
-                least_favorite_genre = lines[1].split(': ')[1]
+                favorite_genre = lines[0].split(': ')[1].lower().replace('-', ' ')
+                least_favorite_genre = lines[1].split(': ')[1].lower().replace('-', ' ')
             except:
                 continue
             if favorite_genre not in self.genre_list or least_favorite_genre not in self.genre_list:
+                c+= 1
+                pbar.set_description(f"pass {c} {favorite_genre} {least_favorite_genre}")    
+                
                 continue
             
             msg = [
@@ -161,6 +184,7 @@ class LargeScaleEvaluator(nn.Module):
 
             gpt_output = openai.ChatCompletion.create(
                             model='gpt-4-1106-preview',
+                            # model='gpt-4o',
                             messages=msg,
                             max_tokens=300,
                             temperature=0.001,
@@ -177,7 +201,7 @@ class LargeScaleEvaluator(nn.Module):
             deltas_ndcg_up.append(0)
 
             
-            pbar.set_description(f"average ndcgs up {np.mean(deltas_ndcg_up)} average ndcg down {np.mean(deltas_ndcg_down)}")    
+            pbar.set_description(f"gen {favorite_genre}, average ndcgs up {np.mean(deltas_ndcg_up)} average ndcg down {np.mean(deltas_ndcg_down)}")    
 
             
 
@@ -191,80 +215,162 @@ class LargeScaleEvaluator(nn.Module):
             }
 
 
-            df = pd.DataFrame(data)
-            df.to_csv(f'./results/{self.args.data_name}/gpt4_results_large_genre_{split}.csv')
-    def evaluate(self,dataloader,prompts,topk,rank = None):
+        df = pd.DataFrame(data)
+        df.to_csv(f'./results/{self.args.data_name}/gpt4_results_large_genre_{split}.csv')
+        print('WROTE DF')
+        self.df = df
+            
+
+    
+    def evaluate(self,dataloader,prompts,topk,rank = None,max_delta = False):
         self.model.eval()
-        # print(self.genre_set)
-        # raise Exception
+
+
 
         # df = pd.read_csv(f'./results/{self.args.data_name}/gpt4_results_large_genre.csv')
-        delta_up = []
-        delta_down = []
+        self.delta_up = []
+        self.delta_down = []
         # print(self.model.device)
         # print(rank)
         # exit()
         c = 0
+
         for b in (pbar:=tqdm(dataloader,desc = 'Controlability')):
             uids = b['idx'].flatten().tolist()
             #if rank is not set set the rank
             labels = b['labels_tr'].to(rank)
+            self.least_fav = []
+            self.most_fav = []   
+            
+
             for uid,label in zip(uids,labels):
                 if uid in self.df['keys'].values:
+
+                    
                     sub_df = self.df[self.df['keys'] == uid]
                     gpt_output = sub_df['outputs'].values[0]
-                    genre1 = sub_df['move_down_genres'].values[0]
-                    genre2 = sub_df['move_up_genres'].values[0]
-                    if genre1 not in self.genre_list or genre2 not in self.genre_list:
-                        continue
-                    down,up,movies1,movies2 = self.getGenreDelta(prompts[uid],gpt_output,label,topk,genre1 ,genre2 ,rank =rank)
+                    genre1 = sub_df['move_down_genres'].values[0].lower().replace('-', ' ')
+                    genre2 = sub_df['move_up_genres'].values[0].lower().replace('-', ' ')
+                    self.least_fav.append(genre2)
+                    self.most_fav.append(genre1)
+                        
+                        
+                    down,up,movies1,movies2 = self.getGenreDelta(prompts[uid],gpt_output,label,topk,genre1 ,genre2 ,rank =rank) if not max_delta else self.getMaxDelta(prompts[uid],gpt_output,label,topk,genre1 ,genre2 ,rank =rank)
+                    # print(f"{up=}")
+                    # print(f"{down=}")
+
                     
                     # print(f"{up=}")
                     # print(f"{down=}")
-                    delta_up.append(up)
-                    # print(f"{delta_up=}")
-                    delta_down.append(down)
+                    self.delta_up.append(up)
+                    # print(f"{self.delta_up=}")
+                    self.delta_down.append(down)
                
 
-        pbar.set_description(f"average ndcgs up {np.mean(delta_up)} average ndcg down {np.mean(delta_down)}")
 
+            print(f"average ndcgs up {np.mean(self.delta_up)} average ndcg down {np.mean(self.delta_down)}")
+            pbar.set_description(f"average ndcgs up {np.mean(self.delta_up)} average ndcg down {np.mean(self.delta_down)}")
 
-        return np.mean(delta_up),np.mean(delta_down)
-    def evaluate_genre(self,model,dataloader,prompts,topk,rank = None,dir = 'more',neg = False):
+        # raise Exception
+        return np.mean(self.delta_up),np.mean(self.delta_down)
+    
+    def evaluate_genre(self,model,dataloader,prompts,topk,rank = None,dir = 'more',neg = False,return_arr = False,genre_changed = None):
             model.eval()
             # print(self.genre_set)
             # raise Exception
-            genres = self.counts.keys()
+            if genre_changed is not None: 
+                genres = [genre_changed]
+            else:
+                genres = self.counts.keys()
             # df = pd.read_csv(f'./results/{self.args.data_name}/gpt4_results_large_genre.csv')
-            delta_up = []
-            delta_down = []
+            self.delta_up = []
+            self.delta_down = []
             # print(self.model.device)
             # print(rank)
             # exit()
-            c = 0
+            
+            
+            
             for b in (pbar:=tqdm(dataloader,desc = 'Controlability')):
                 uids = b['idx'].flatten().tolist()
                 #if rank is not set set the rank
                 labels = b['labels_tr'].to(rank)
+                mean_per_user = []
+                out_metrics = []
                 for uid,label in zip(uids,labels):
 
                     for genre in genres:
                         rep_s = f' Summary: {dir} {genre} films'
                         down,up,movies1,movies2 = self.getGenreDelta('',rep_s,label,topk,genre ,'Action' ,rank =rank,neg=neg)
-                        
-                        # print(f"{genre=}")
-                        # print(f"{up=}")
 
-                        # print(f"{up=}")
-                        # print(f"{down=}")
-                        delta_up.append(up)
+
+                        self.delta_up.append(up)
                         # print(f"{delta_up=}")
-                        delta_down.append(down)
-                    
-
-                    pbar.set_description(f"average ndcgs up {np.median(delta_up)} average ndcg down {np.mean(delta_down)}")
-
-            return np.mean(delta_up),np.mean(delta_down)
+                        self.delta_down.append(down)
                         
-            
 
+                        mean_per_user.append(down)
+                    out_metrics.append(np.mean(mean_per_user))
+
+                    pbar.set_description(f"average ndcgs up {np.median(self.delta_up)} average ndcg down {np.mean(self.delta_down)}")
+            if return_arr:
+                
+                return out_metrics,out_metrics
+            else: 
+                return np.mean(self.delta_up),np.mean(self.delta_down)
+                        
+
+            
+    def getMaxDelta(self, s1,s2,labels,topk,genre_1 , genre_2,rank ,neg=False):
+
+        # print(f"{s1=}")
+        # print(f"{s2=}")
+        if self.args.mask_control_labels:
+        # if True:
+            labels = torch.zeros_like(labels)
+        # labels = torch.zeros_like(labels)
+        # print(f"{labels.sum()=}")
+        if  self.args.embedding_module not in  ['RecVAEGenreVAE','GenreTEARS']:
+            if isinstance(self.model, DistributedDataParallel):
+                topk1 = self.model.module.generate_recommendations(s1, self.tokenizer, labels, topk, rank,alpha = self.alpha,neg = neg)
+                topk2 = self.model.module.generate_recommendations(s2, self.tokenizer, labels, topk, rank,alpha = self.alpha if self.alpha2 is not None else self.alpha2,neg = neg)
+
+            else:
+                topk1 = self.model.generate_recommendations(s1, self.tokenizer, labels, topk, rank,alpha = self.alpha,neg =neg)
+                
+                topk2 = self.model.generate_recommendations(s2, self.tokenizer, labels, topk, rank,alpha = self.alpha if self.alpha2 is not None else self.alpha2,neg = neg)
+        else: 
+            if isinstance(self.model, DistributedDataParallel):
+                topk1 = self.model.module.generate_recommendations(  topk =topk, rank=rank,alpha = self.alpha,neg = neg)
+                topk2 = self.model.module.generate_recommendations(mask_genre = genre_2, topk = topk, rank =rank,alpha = self.alpha if self.alpha2 is not None else self.alpha2,neg = neg)
+
+            else:
+                topk1 = self.model.generate_recommendations( data_tensor = labels,topk =topk, rank=rank,alpha = self.alpha,neg = neg)
+
+                
+                topk2 = self.model.generate_recommendations(data_tensor = labels,mask_genre = genre_2, topk = topk, rank =rank,alpha = self.alpha if self.alpha2 is not None else self.alpha2,neg = neg)
+
+
+        movie_titles1 = [self.item_title_dict[i] for i in topk1]
+        movie_titles2 = [self.item_title_dict[i] for i in topk2]
+        # print(f"{movie_titles1=}")
+        # print(f"{movie_titles2=}")
+
+        movie_genres1 = [self.item_genre_dict[i] for i in topk1]
+        movie_genres2 = [self.item_genre_dict[i] for i in topk2]
+        
+        change_down = self.genrewise_ndcg(movie_genres1,genre_1,min_k = 0,max_k = topk) - 0
+        # print(f"{genre_1=}")
+        # print(f"{self.genrewise_ndcg(movie_genres1,genre_1,min_k = 0,max_k = topk)=}")
+        # print(f"{change_down=}")
+        # print(f"{self.genrewise_ndcg(movie_genres2,genre_1,min_k = 0,max_k = topk)=}")
+        change_up =  self.genrewise_ndcg(movie_genres1,genre_2,min_k = 0,max_k = topk) - 1
+        # print(f"{genre_2=}")
+        # print(f"{change_up=}")
+        # raise Exception
+        
+        return change_down,change_up,movie_titles1,movie_titles2
+
+        
+    def get_qualitative_metrics(self,):
+        return {'fav_genres': self.most_fav, 'least_fav_genres': self.least_fav,'down': self.delta_down, 'up': self.delta_up}

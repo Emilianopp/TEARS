@@ -24,17 +24,17 @@ global_path = '/home/mila/e/emiliano.penaloza/LLM4REC'
 load_dotenv()
 key = os.getenv("OPEN-AI-SECRET")
 parser = ArgumentParser(description="Your script description here")
-parser.add_argument("--train_data", default="./data_preprocessed/ml-1m/prompt_set_timestamped.csv", help="Path to the training data CSV file")
-parser.add_argument("--test_data", default="./data_preprocessed/ml-1m/strong_generalization_set_timestamped.csv", help="Path to the training data CSV file")
+parser.add_argument("--data_name", default = 'ml-1m', help="Name of the dataset to use")
 parser.add_argument("--gpt_version", default="gpt-4-1106-preview", help="GPT model version")
 parser.add_argument("--max_tokens", type=int, default=300, help="Maximum number of tokens for the response")
 parser.add_argument("--num_samples", type=int, default=1, help="Maximum number of tokens for the response")
 parser.add_argument("--debug", action='store_true', help="Whether to run in debug mode")
-parser.add_argument("--num_movies", type=int, default=70, help="Maximum number of tokens for the response")
+parser.add_argument("--num_movies", type=int, default=100, help="Maximum number of tokens for the response")
 parser.add_argument("--num_thresh", type=int, default=70, help="Maximum number of tokens for the response")
-parser.add_argument("--data_name", type=str, default="ml-1m", help="Maximum number of tokens for the response")
 
 args = parser.parse_args()
+train_data = f'./data_preprocessed/{args.data_name}/prompt_set_timestamped.csv'
+test_data = f'./data_preprocessed/{args.data_name}/strong_generalization_set_.csv'
 
 
 
@@ -84,7 +84,8 @@ def generate_prompts_recent(train_data,num_movies = 30):
     
 
 random.seed(2024)
-strong_generalization_set = pd.read_csv(args.test_data)
+print(f"{test_data=}")
+strong_generalization_set = pd.read_csv(test_data)
 strong_gen_val_user_set = random.sample(list(strong_generalization_set.userId.unique()),int(len(strong_generalization_set.userId.unique())/2))
 strong_generalization_set_val =strong_generalization_set[strong_generalization_set.userId.isin(strong_gen_val_user_set)]
 test = strong_generalization_set[~strong_generalization_set.userId.isin(strong_gen_val_user_set)]
@@ -92,6 +93,8 @@ test = strong_generalization_set[~strong_generalization_set.userId.isin(strong_g
 grouped_test = test.groupby('userId').count()
 user_set = grouped_test[grouped_test['movieId'] > args.num_movies].index
 data = test[test.userId.isin(user_set)]
+
+
 
 
 

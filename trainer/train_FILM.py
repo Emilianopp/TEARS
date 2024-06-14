@@ -131,18 +131,21 @@ def train_fun(rank,world_size):
         train_matrix = 0
         l2_regs = np.linspace(1,10000,50)
 
-        for l2_reg in l2_regs:
+        for l2_reg in (pbar:=tqdm(l2_regs[1:2])):
             model = get_EASE(args,num_movies,l2_reg)
             print(f"{model=}")
             model(target_items)
             metrics = model.eval(val_items,val_target_items)
             recall = metrics['ndcg@50']
-            print(f"Recall@50 = {recall}")
+            pbar.set_description(f"Recall@50 = {recall}, l2_reg = {l2_reg}")
+            # print(f"Recall@50 = {recall}")
             if recall > train_matrix:
                 train_matrix = recall
                 best_l2_reg = l2_reg
         print(f"Best L2 Reg = {best_l2_reg}")
         test_recall = model.eval(test_items,test_target_items)
+        print(f"{test_recall=}")
+        exit()
     
     model,lora_config = get_model(args, tokenizer, num_movies, rank, world_size)
     model.to(rank)
@@ -177,7 +180,7 @@ def train_fun(rank,world_size):
             for name, param in model.named_parameters():
                 if 'lora' in name:
                     param.requires_grad = False
-    mods = ['OTRecVAE','FT5RecVAE','T5Vae','MacridTEARS']
+    mods = ['OTRecVAE','FT5RecVAE','T5Vae','MacridTEARS','RecVAEGenreVAE']
     if args.warmup <= 0 and args.embedding_module in mods:
         for name, param in model.vae.named_parameters():
 

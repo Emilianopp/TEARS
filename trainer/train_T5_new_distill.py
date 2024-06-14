@@ -71,11 +71,11 @@ def train_fun(rank,world_size):
         
 
         tokenizer = T5Tokenizer.from_pretrained('t5-large')
-        prompts,rec_dataloader,n_items,val_dataloader,test_dataloader,val_data_tr,test_data_tr,non_binary_data = load_data(args,tokenizer,rank,world_size)
+        prompts,rec_dataloader,augmented_dataloader,num_movies,val_dataloader,test_dataloader,vad_data_tr,test_data_tr,non_bin_dataloader= load_data(args,tokenizer,rank,world_size)
         model_name = f"{args.embedding_module}-large"
         
         if args.embedding_module == 't5_classification':
-            model = sentenceT5Classification.from_pretrained('t5-large', num_labels=n_items, classifier_dropout = args.dropout)
+            model = sentenceT5Classification.from_pretrained('t5-large', num_labels=num_movies, classifier_dropout = args.dropout)
             lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
                                     target_modules=["q", "v"],
                                     modules_to_save=['classification_head'])
@@ -116,7 +116,7 @@ def train_fun(rank,world_size):
         for e in (pbar := tqdm(range(args.epochs))):
             model.train()
             model.share_memory()
-            train_fun(args, rec_dataloader, model, optimizer, scheduler,pbar,e,rank, non_binary_data, teacher)
+            train_fun(args, rec_dataloader, model, optimizer, scheduler,pbar,e,rank, train_data, teacher)
             if e % 1 == 0: 
                 torch.cuda.set_device(rank)
 

@@ -1,0 +1,12 @@
+[=== Module python/3.10 loaded ===]
+
+The following have been reloaded with a version change:
+  1) python/3.8 => python/3.10
+
+[=== Module python/3.8 loaded ===]
+
+The following have been reloaded with a version change:
+  1) python/3.10 => python/3.8
+
+[=== Module python/3.8 loaded ===]
+/home/mila/e/emiliano.penaloza/llm4rec/bin/python: Error while finding module specification for 'trainer.train_T5_new_distill' (ModuleNotFoundError: No module named 'trainer')

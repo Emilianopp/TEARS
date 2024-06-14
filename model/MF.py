@@ -1,5 +1,10 @@
 from helper.eval_metrics import Recall_at_k_batch,NDCG_binary_at_k_batch,MRR_at_k
 from torch.distributions import Normal, kl_divergence, RelaxedOneHotCategorical
+import sys 
+sys.path.append('../')
+from collections import defaultdict
+
+from helper.dataloader import map_id_to_genre
 
 import torch
 import torch.nn as nn
@@ -153,60 +158,6 @@ class RecVAE(nn.Module):
 
 
 
-# class RecVAE(nn.Module):
-#     def __init__(self, p_dims,dropout = .5,gamma = .005):
-#         super(RecVAE, self).__init__()
-#         hidden_dim=latent_dim = p_dims[0]
-#         input_dim = p_dims[1]
-#         self.gamma = gamma
-#         self.dropout = dropout
-#         self.q = Encoder(hidden_dim, latent_dim, input_dim)
-#         self.prior = CompositePrior(hidden_dim, latent_dim, input_dim)
-#         self.decoder = nn.Linear(latent_dim, input_dim)
-#         # self.__init__weights(fan_in = latent_dim,fan_out = input_dim)
-        
-#     def __init__weights(self, fan_in, fan_out):
-#         std= np.sqrt(2.0 / (fan_in + fan_out))
-#         self.decoder.weight.data.normal_(0.0, std)
-         
-    
-#     def reparameterize(self, mu, logvar):
-#         if self.training:
-#             std = torch.exp(0.5*logvar)
-#             eps = torch.randn_like(std)
-#             return eps.mul(std).add_(mu)
-#         else:
-#             return mu
-#     def encode(self,user_ratings):
-#         mu, logvar = self.q(user_ratings, dropout_rate=self.dropout)    
-        
-#         return mu,logvar
-#     def decode(self,z):
-#         return self.decoder(z)
-#     def forward(self, user_ratings, beta=None,  calculate_loss=False):
-#         mu, logvar = self.q(user_ratings, dropout_rate=self.dropout)    
-#         z = self.reparameterize(mu, logvar)
-#         x_pred = self.decoder(z)
-        
-#         if calculate_loss:
-#             if self.gamma:
-#                 norm = user_ratings.sum(dim=-1)
-#                 kl_weight = self.gamma * norm
-#             elif beta:
-#                 kl_weight = beta
-
-#             mll = (F.log_softmax(x_pred, dim=-1) * user_ratings).sum(dim=-1).mean()
-#             kld = (log_norm_pdf(z, mu, logvar) - self.prior(user_ratings, z)).sum(dim=-1).mul(kl_weight).mean()
-#             negative_elbo = -(mll - kld)
-            
-#             return x_pred, negative_elbo
-            
-#         else:
-
-#             return x_pred,mu,logvar,z
-
-#     def update_prior(self):
-#         self.prior.encoder_old.load_state_dict(deepcopy(self.q.state_dict()))
         
 
 
@@ -491,8 +442,308 @@ class otVAE (T5PreTrainedModel):
 
 
 
-        
+class GenreVae(nn.Module):
+    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
+    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
+    def __init__(self,num_genres,prior,genre_map,genres_l,epsilon,concat=False,num_movies = None):
+        super().__init__()
+        self.epsilon = epsilon
+        self.num_genres = num_genres
+        self.mlp = nn.Sequential(
+            nn.Linear( num_genres,800, bias=False),
+        )
+        self.vae = prior
+        self.genres_l = genres_l
+        self.model_parallel = True
+        self.concat = concat
+        if concat: 
+            self.concat_mlp = nn.Linear(800,400,bias = False)
+        self.__init__weights()
+        self.genre_map = genre_map 
+        self.genre_coutns = {g:0 for g in genres_l}
+        #fill in genre counts 
+        self.genre_inds = {g.replace('-',' '):i for i,g in enumerate(sorted(genres_l))}
+        for g in genre_map:
+            for g_ in genre_map[g]:
+                self.genre_coutns[g_] += 1
+        self.genre_count_vector = torch.tensor([self.genre_coutns[g] for g in genres_l]).float()
+        self.genre_columns_one_hot = defaultdict(lambda : torch.zeros(num_movies))
+
+            
+    def __init__weights(self):
+        for layer in self.mlp:
+            if isinstance(layer, nn.Linear):
+                fan_in = layer.weight.size()[1]
+                fan_out = layer.weight.size()[0]
+                std = np.sqrt(2.0 / (fan_in + fan_out))
+                layer.weight.data.normal_(0.0, std)
+        if self.concat:
+            fan_in = self.concat_mlp.weight.size()[1]
+            fan_out = self.concat_mlp.weight.size()[0]
+            std = np.sqrt(2.0 / (fan_in + fan_out))
+            self.concat_mlp.weight.data.normal_(0.0, std)
+            
+    def set_vae(self,vae):
+        self.vae = vae
+
     
+    def make_genre_vector(self, input ): 
+
+        # Initialize the genre vector
+        genre_vector = torch.zeros(input.shape[0], self.num_genres, device=input.device)
+        
+        # Create a genre map tensor for quick look-up
+   
+        genre_map_tensor = torch.tensor([[int(g in self.genre_map[j]) for g in sorted(self.genres_l)] for j in range(input.shape[1])], device=input.device).float()
+        
+        # Use matrix multiplication to accumulate the counts
+        genre_vector += input @ genre_map_tensor
+        normalized_genre_vector = genre_vector / genre_vector.sum(dim=1).unsqueeze(1)
+
+
+
+        return normalized_genre_vector
+
+
+    def forward(
+        self,
+        data_tensor: torch.LongTensor = None,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        return_dict: Optional[bool] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        output_attentions = None,
+        output_hidden_states = None,
+        return_dict_in_generate = None,
+        alpha = .5,
+        neg = False
+    ) :
+
+
+        # print(f"{self.vae.modules_to_save['default']=}")
+        try:
+            vae = self.vae.modules_to_save['default']
+        except:
+            vae = self.vae
+        sentence_rep = self.make_genre_vector(data_tensor)
+        sentence_rep = self.mlp(sentence_rep)
+        mu,logvar = sentence_rep[:,:400],sentence_rep[:,400:]
+        z_text = self.reparameterize(mu, logvar)
+        prior_mu, prior_logvar = vae.encode(data_tensor)
+        z_rec = vae.reparameterize(prior_mu, prior_logvar)
+
+        #map z_rec onto the text 
+        if self.concat:
+            z_merged = torch.cat([z_text,z_rec],dim = 1)
+            z_merged = self.concat_mlp(z_merged) if alpha != 0 else z_text 
+        elif neg: 
+
+            z_merged =  + (z_rec -z_text)/2
+            
+        else:
+
+            z_merged = (1-alpha)*z_text + alpha*z_rec 
+
+
+        logits_merged = vae.decode(z_merged)
+        logits_rec = vae.decode(z_rec)
+        logits_text = vae.decode(z_text)
+        
+
+        
+        
+        return logits_merged,logits_rec,logits_text,mu,logvar,prior_mu,prior_logvar,z_rec,None
+    
+    
+    def classifier_forward(self,data_tensor,hidden_states,alpha = None ):
+        # hidden_states = self.linear(hidden_states)
+        # hidden_states = F.gelu(hidden_states)
+        logits = self.classifier(data_tensor,hidden_states)
+        return logits
+
+
+    def reparameterize(self, mu, logvar):
+        if self.training:
+            std = torch.exp(0.5 * logvar)
+            eps = torch.randn_like(std)
+            return eps.mul(std).add_(mu)
+        else:
+            return mu
+
+    def generate_recommendations(self,data_tensor,topk,rank = 0 ,alpha = .5,neg = False,increase = False,nothing= False,mask_genre = None):
+
+        data_tensor=data_tensor.unsqueeze(0)
+        try:
+            vae = self.vae.modules_to_save['default']
+        except:
+            vae = self.vae
+
+
+
+
+        
+        sentence_rep = self.make_genre_vector(data_tensor)
+        if mask_genre is not None:
+
+            mask_index = self.genre_inds[mask_genre]
+            mask = torch.zeros(sentence_rep.size(1), dtype=torch.bool)
+            mask[mask_index] = True
+            sentence_rep[:,~mask] = 0
+            sentence_rep[:,mask] = 1
+
+            
+            
+        #get a dict of columsn for each genre 
+
+
+        
+        
+        
+        sentence_rep = self.mlp(sentence_rep)
+        mu,logvar = sentence_rep[:,:400],sentence_rep[:,400:]
+        z_text = self.reparameterize(mu, logvar)
+        prior_mu, prior_logvar = vae.encode(data_tensor)
+        z_rec = vae.reparameterize(prior_mu, prior_logvar)
+
+        #map z_rec onto the text 
+        if self.concat:
+            z_merged = torch.cat([z_text,z_rec],dim = 1)
+            z_merged = self.concat_mlp(z_merged) if alpha != 0 else z_text 
+        elif neg: 
+
+            z_merged =  + (z_rec -z_text)/2
+            
+        else:
+
+            z_merged = (1-alpha)*z_text + alpha*z_rec 
+
+
+        logits = vae.decode(z_merged)
+
+        #check shape of data_tensor 
+        
+        #mask the logits of the data_tensor 
+        logits[data_tensor >= 1] = np.log(.000001)
+        
+        #returned ranked items based on topk
+
+        ranked_logts = torch.topk(logits,topk)
+
+
+        return ranked_logts.indices.flatten().tolist() 
+        
+ 
+class GenreTEARS(nn.Module):
+    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
+    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
+    def __init__(self,num_genres,genre_map,genres_l,epsilon,dropout,concat=False,num_movies = None):
+        super().__init__()
+        self.epsilon = epsilon
+        self.num_genres = num_genres
+        self.mlp = nn.Sequential(
+            nn.Linear( num_genres,800, bias=False),
+        )
+        self.genres_l = genres_l
+        self.model_parallel = True
+        self.concat = concat
+        if concat: 
+            self.concat_mlp = nn.Linear(800,400,bias = False)
+
+        self.genre_map = genre_map 
+        self.genre_coutns = {g:0 for g in genres_l}
+        #fill in genre counts 
+        self.genre_inds = {g.replace('-',' '):i for i,g in enumerate(sorted(genres_l))}
+        for g in genre_map:
+            for g_ in genre_map[g]:
+                self.genre_coutns[g_] += 1
+        self.genre_count_vector = torch.tensor([self.genre_coutns[g] for g in genres_l]).float()
+        self.genre_columns_one_hot = defaultdict(lambda : torch.zeros(num_movies))
+
+        self.classifier = MultiVAE(q_dims = [num_genres,800,400],p_dims = [400,num_movies],dropout = dropout)
+     
+
+        # self.post_init()
+        self.model_parallel = True
+        
+    def make_genre_vector(self, input ): 
+
+        # Initialize the genre vector
+        genre_vector = torch.zeros(input.shape[0], self.num_genres, device=input.device)
+        
+        # Create a genre map tensor for quick look-up
+   
+        genre_map_tensor = torch.tensor([[int(g in self.genre_map[j]) for g in sorted(self.genres_l)] for j in range(input.shape[1])], device=input.device).float()
+        
+        # Use matrix multiplication to accumulate the counts
+        genre_vector += input @ genre_map_tensor
+        normalized_genre_vector = genre_vector / genre_vector.sum(dim=1).unsqueeze(1)
+
+
+
+        return normalized_genre_vector
+
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        return_dict: Optional[bool] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        labels_tr: Optional[torch.LongTensor] = None,
+        output_attentions = None,
+        output_hidden_states = None,
+        return_dict_in_generate = None,
+        data_tensor = None
+    ) :
+        
+        sentence_rep = self.make_genre_vector(data_tensor)
+
+        logits,mu,logvar = self.classifier_forward(sentence_rep)
+
+        
+        return logits,mu,logvar
+        
+    def classifier_forward(self,hidden_states):
+        logits,mu,logvar = self.classifier(hidden_states)
+        return logits,mu,logvar
+    def encode(self,data_tensor):
+
+
+        return self.classifier.original_module.encode(data_tensor)
+    def decode (self,z):
+        return self.classifier.original_module.decode(z)
+    
+    def generate_recommendations(self,data_tensor,topk,rank = 0 ,alpha = .5,neg = False,increase = False,nothing= False,mask_genre = None):
+
+        data_tensor=data_tensor.unsqueeze(0)
+      
+        sentence_rep = self.make_genre_vector(data_tensor)
+        if mask_genre is not None:
+
+            mask_index = self.genre_inds[mask_genre]
+            mask = torch.zeros(sentence_rep.size(1), dtype=torch.bool)
+            mask[mask_index] = True
+            sentence_rep[:,~mask] = 0
+            sentence_rep[:,mask] = 1
+
+        logits = self.classifier_forward(sentence_rep)[0]
+        #check shape of data_tensor 
+        if len(data_tensor.shape) == 1:
+            data_tensor = data_tensor.unsqueeze(0)
+        
+        #mask the logits of the data_tensor 
+
+        logits[data_tensor >= 1] = np.log(.000001)
+        
+        #returned ranked items based on topk
+
+        ranked_logts = torch.topk(logits,topk)
+
+
+        return ranked_logts.indices.flatten().tolist()
+           
 
 class T5Vae(T5PreTrainedModel):
     _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
@@ -564,7 +815,7 @@ class T5Vae(T5PreTrainedModel):
 
             z_merged =  + (z_rec -z_text)/2
             
-        else:
+        else :
 
             z_merged = (1-alpha)*z_text + alpha*z_rec 
 
@@ -618,9 +869,14 @@ class T5Vae(T5PreTrainedModel):
         else:
             return mu
 
-    def generate_recommendations(self,summary,tokenizer,data_tensor,topk,rank = 0 ,alpha = .5,neg = False):
+    def generate_recommendations(self,summary,tokenizer,data_tensor,topk,rank = 0 ,alpha = .5,neg = False,return_emb = False):
         if len(data_tensor.shape) == 1:
             data_tensor = data_tensor.unsqueeze(0)
+        if return_emb:
+            tokenized_summary = tokenizer(summary,return_tensors="pt")
+            tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
+            
+            return self.forward(data_tensor = data_tensor,input_ids = tokenized_summary['input_ids'],attention_mask = tokenized_summary['attention_mask'],alpha = alpha,neg = neg)
         tokenized_summary = tokenizer([summary],return_tensors="pt")
 
         
@@ -636,7 +892,7 @@ class T5Vae(T5PreTrainedModel):
         ranked_logts = torch.topk(logits,topk)
 
 
-        return ranked_logts.indices.flatten().tolist()
+        return ranked_logts.indices.flatten().tolist() 
 
 
 
@@ -1722,7 +1978,7 @@ def get_model(args, tokenizer, num_movies, rank, world_size):
         model,lora_config  = get_VAE_model(args,num_movies)
     elif args.embedding_module =='VAE':
         if args.DAE:
-            return get_MultiDAE(args,num_movies)
+            return get_MultiDAE(args,num_movies) 
             
 
         model,lora_config = get_MultiVAE(args,num_movies)
@@ -1747,6 +2003,10 @@ def get_model(args, tokenizer, num_movies, rank, world_size):
         return get_MacridVAE(args,num_movies)
     elif args.embedding_module =='MacridTEARS':
         return get_MacridTEARS(args,num_movies)
+    elif args.embedding_module == 'RecVAEGenreVAE':
+        return get_GenreVAE(args,num_movies)
+    elif args.embedding_module == 'GenreTEARS':
+        return get_GenreTEARS(args,num_movies)
     else:
         raise ValueError(f"Unsupported embedding module: {args.embedding_module}")
     return model,lora_config
@@ -1757,6 +2017,21 @@ def get_VariationalT5(args,num_movies):
                             target_modules=['q','v','k'],
                             modules_to_save=['classifier'])
     return model,lora_config
+
+def get_GenreTEARS(args,num_movies):
+    id_to_genre = map_id_to_genre(args.data_name)
+    genre_s = set()
+    #the values of the list are olists of genres 
+    for key in id_to_genre.keys():
+        [genre_s.add(g) for g in id_to_genre[key]]
+    num_genres = len(genre_s)
+
+    model = GenreTEARS(num_genres=num_genres,
+                       genres_l = list(genre_s),
+                       num_movies=num_movies,genre_map = id_to_genre,epsilon = args.epsilon,dropout= args.dropout)
+    
+    return model,None
+
 
 def get_VAE_model(args,num_movies):
     model = sentenceT5ClassificationVAE.from_pretrained('google-t5/t5-3b', num_labels=num_movies, classifier_dropout = args.dropout)
@@ -1804,50 +2079,6 @@ def get_EASE(args,num_movies,l2_reg):
 
 
 
-def get_mcgill_model(args, num_movies, tokenizer):
-
-        config = AutoConfig.from_pretrained(args.embedding_module, trust_remote_code=True)
-        bnb_config = BitsAndBytesConfig(  
-                load_in_4bit= True,
-                bnb_4bit_quant_type= "nf4",
-                bnb_4bit_compute_dtype= torch.bfloat16,
-                bnb_4bit_use_double_quant= True,
-            )
-        model = AutoModel.from_pretrained(
-            args.embedding_module,
-            trust_remote_code=True,
-            config=config,
-            quantization_config=bnb_config,
-            # torch_dtype=torch.bfloat16,
-            # device_map="cuda" if torch.cuda.is_available() else "cpu",
-        )
-        model = PeftModel.from_pretrained(
-            model,
-            "McGill-NLP/LLM2Vec-Mistral-7B-Instruct-v2-mntp"
-        )
-        model = model.merge_and_unload()  # This can take several minutes on cpu
-        
-        model = PeftModel.from_pretrained(
-            model, "McGill-NLP/LLM2Vec-Mistral-7B-Instruct-v2-mntp-unsup-simcse"
-        )
-
-        model_config = model.config
-        model = MistralClassifier(model, num_movies, args.dropout,config,pooling_mode = args.pooling,tokenizer = tokenizer)
-        # model = model.bfloat16()
-        # model.gradient_checkpointing_enable()
-        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing = True)
-        #check type of all the parameters in the model if any equal torckuin8 break the loop and print it 
-        # for name, param in model.named_parameters():
-        #     if param.dtype == torch.uint8:
-        #         print(f"{name} has dtype torch.uint8")
-        #         print(f"{param=}")
-        #         exit()
-        lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
-                                target_modules=["q_proj", "k_proj", "v_proj"],
-                                bias = 'none',
-                                
-                                modules_to_save=['classifier'])
-        return model,lora_config
 
 def get_t5VAE(args,num_movies):
     pdims = [400,num_movies]
@@ -1856,6 +2087,8 @@ def get_t5VAE(args,num_movies):
         p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_VAE_2024-04-27_21-08-15.csv.pt'
     elif args.data_name =='netflix':
         p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_VAE_2024-05-02_14-27-25.csv.pt'
+    elif args.data_name == 'goodbooks':
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_VAE_2024-05-26_17-30-51.csv.pt'
     state_dict = torch.load(p)
     prior.load_state_dict(state_dict)
     model = T5Vae.from_pretrained('google-t5/t5-base',num_labels=num_movies, classifier_dropout = args.dropout,prior = prior,epsilon = args.epsilon)
@@ -1891,7 +2124,9 @@ def get_t5RecVAE(args,num_movies):
     elif args.data_name =='ml-1m':
         p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_RecVAE_2024-05-02_13-10-49.csv.pt'
         # p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_RecVAE_2024-04-27_15-53-38.csv.pt'
-        
+    elif args.data_name =='goodbooks':
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_RecVAE_2024-05-24_11-57-20.csv.pt'
+
         
     state_dict = torch.load(p)
     prior.load_state_dict(state_dict)
@@ -1911,7 +2146,44 @@ def get_t5RecVAE(args,num_movies):
     
 
     return model ,None
+
+
+def get_GenreVAE(args,num_movies): 
+    pdims = [400,num_movies]
+    # print(f"{num_movies=}")
+
+    prior =  RecVAE(pdims, dropout = args.dropout,gamma= args.gamma)
+    if args.data_name == 'netflix':
+        # print('netflix')
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_RecVAE_2024-05-02_14-54-48.csv.pt'
+    elif args.data_name =='ml-1m':
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_RecVAE_2024-05-02_13-10-49.csv.pt'
+        # p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_RecVAE_2024-04-27_15-53-38.csv.pt'
+    elif args.data_name =='goodbooks':
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_RecVAE_2024-05-24_11-57-20.csv.pt'
+
+        
+    state_dict = torch.load(p)
+    prior.load_state_dict(state_dict)
+    # classifier =  RecVAE(pdims, dropout = args.dropout)
+    id_to_genre = map_id_to_genre(args.data_name)
+    genre_s = set()
+    #the values of the list are olists of genres 
+    for key in id_to_genre.keys():
+        [genre_s.add(g) for g in id_to_genre[key]]
+    num_genres = len(genre_s)
+    model = GenreVae(num_genres=num_genres, 
+                                  genre_map=id_to_genre,prior = None,
+                                  genres_l = list(genre_s), epsilon = args.epsilon,concat = args.concat,num_movies = num_movies)
+    # model = get_peft_model(model, lora_config)
+    model.set_vae( prior )
+    # print(f"{model.vae=}")
+    # model.prior.train()
     
+
+    return model ,None
+
+
 def get_MacridTEARS(args,num_movies): 
     args.dfac = 400//args.kfac
     
@@ -1921,6 +2193,10 @@ def get_MacridTEARS(args,num_movies):
     elif args.data_name == 'netflix':
         
         p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_MacridVAE_2024-05-11_11-36-07.csv.pt'
+    elif args.data_name =='goodbooks':
+        
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_MacridVAE_2024-05-27_12-56-52.csv.pt'
+
         
 
     vae.load_state_dict(torch.load(p))
@@ -1948,6 +2224,10 @@ def get_OT_RecVAE(args,num_movies):
     if args.data_name == 'netflix':
 
         p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_RecVAE_2024-04-27_10-56-43.csv.pt'
+    elif args.data_name =='goodbooks':
+        
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_RecVAE_2024-05-20_11-27-02.csv.pt'
+        
     else: 
         
         p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_RecVAE_2024-04-27_20-51-00.csv.pt'

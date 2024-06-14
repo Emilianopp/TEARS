@@ -34,6 +34,9 @@ def parse_args(notebook = False):  # Parse command line arguments
     parser.add_argument("--num_samples", default=100, type=int)
     parser.add_argument("--max_l", default=1778, type=int)
     parser.add_argument("--debug_prompts", default=False, type=bool)
+    parser.add_argument("--binarize", default=True, type=bool)
+    parser.add_argument("--masked_and_original", default=True, type=bool)
+    parser.add_argument("--mask", default=0, type=int)
     args = parser.parse_args() if not notebook else parser.parse_args(args=[])
     args.scratch = '/home/mila/e/emiliano.penaloza/scratch'
     return args
@@ -46,7 +49,7 @@ max_l = args.max_l
 key = os.getenv("OPEN-AI-SECRET")
 openai.api_key = key
 tokenizer = AutoTokenizer.from_pretrained("t5-large")
-prompts,rec_dataloader,num_movies,val_dataloader,test_dataloader,_,_= load_data(args,tokenizer,0,1)
+prompts,rec_dataloader,augmented_dataloader,num_movies,val_dataloader,test_dataloader,valid_data_tr,test_data_tr= load_data(args,tokenizer,0,1)
 
 # Load model and mapping dicts
 path = './model/weights/TEARS_FineTuned.pt'
@@ -56,8 +59,54 @@ lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=32, lora_alpha=16, lora_d
                             target_modules=["q", "v"],
                             modules_to_save=['classification_head'])
 model = get_peft_model(model, lora_config)
-model.load_state_dict(torch.load(path ,map_location=torch.device('cpu')))
+state_dict = torch.load(path ,map_location=torch.device('cpu'))
+
+#remove original_module from the dict superkey 
+state_dict = {k.replace('classification_head.','classifier.'):v for k,v in state_dict.items()}
+model.load_state_dict(state_dict)
 model.to(0)
+
+
+def map_title_to_id(movies_file):
+    data = pd.read_csv(movies_file,sep="::",names=["movieId","title","genre"],encoding='ISO-8859-1')
+    mapping = {}
+    for index, row in data.iterrows():
+        mapping[row['title']] = row['movieId']
+    return mapping
+
+def map_id_to_title(data_file,data = 'ml-1m'):
+    if data == 'ml-1m':
+        data = pd.read_csv(data_file,sep="::",names=["itemId","title","genre"],encoding='ISO-8859-1')
+
+        mapping = {}
+        for index, row in data.iterrows():
+            
+            mapping[row['itemId']] = row['title']
+
+        return mapping
+    elif data == 'books': 
+        df = pd.read_csv(data_file)
+        return df.set_index('sid').to_dict()['title']
+        
+        
+        
+
+def map_id_to_genre(path= './data/ml-1m/movies.dat',data='ml-1m'):
+    if data == 'ml-1m':
+        data = pd.read_csv(path,sep="::",names=["itemId","title","genre"],encoding='ISO-8859-1')
+
+        mapping = {}
+        for index, row in data.iterrows():
+            
+            mapping[row['itemId']] = row['genre']
+
+        return mapping
+    elif data =='books': 
+        df = pd.read_csv(path)
+        return df.set_index('sid').to_dict()['genres']
+
+
+  
 
 with open('./data_preprocessed/ml-1m/show2id.pkl','rb') as f:
     movie_id_map = pickle.load(f)

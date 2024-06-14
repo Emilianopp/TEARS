@@ -194,6 +194,7 @@ def split_train_test_proportion(data, test_prop=0.2):
         group_val = group[~group.itemId.isin(user_prompts_user.itemId)]
         group_val = group_val[group_val.rating > 3]
 
+
         tr_list.append(group_train)
         te_list.append(group_val)
         
@@ -247,10 +248,8 @@ if __name__ == '__main__':
         raw_data.rename(columns={'book_id':'itemId','review/time':'timestamp','Title':'title','review/score':'rating','User_id':'userId','categories':'genres'}, inplace=True)
     elif args.data_name =='goodbooks':
 
-        if args.filtered: 
-            raw_data = pd.read_csv(f'../data/{args.data_name}/ratings_filtered.csv', header=0)    
-        else: 
-            raw_data = pd.read_csv(f'../data/{args.data_name}/ratings.csv', header=0)
+  
+        raw_data = pd.read_csv(f'../data/{args.data_name}/ratings.csv', header=0)
         
         raw_data.rename(columns={'book_id':'itemId','Title':'title','user_id':'userId'}, inplace=True)
         with open('../saved_user_summary/goodbooks/user_summary_gpt4_.json','rb') as f:

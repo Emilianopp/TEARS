@@ -4,9 +4,6 @@ sys.path.append('../')
 import json
 import time
 import random 
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, AutoModelForCausalLM
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
-from transformers import LlamaTokenizer, LlamaForCausalLM
 from transformers import pipeline
 import torch
 import re
@@ -14,14 +11,10 @@ from collections import defaultdict
 import openai
 # from tenacity import retry, wait_exponential, stop_after_attempt
 from tqdm import tqdm
-from dotenv import load_dotenv
-from helper.in_context_learning_batch import in_context_user_summary, in_context_retrieval
-from helper.builder import build_context, build_movie_candidates
 import torch
 import time
 import json
-from torch.utils.data import Dataset, DataLoader
-from data.dataloader import get_dataloader
+
 from argparse import ArgumentParser
 import os
 import pandas as pd 
@@ -35,12 +28,16 @@ global_path = '/home/mila/e/emiliano.penaloza/LLM4REC'
 load_dotenv()
 key = os.getenv("OPEN-AI-SECRET")
 parser = ArgumentParser(description="Your script description here")
-parser.add_argument("--train_data", default="../data_preprocessed/ml-1m/prompt_set_timestamped.csv", help="Path to the training data CSV file")
-parser.add_argument("--test_data", default="../data_preprocessed/ml-1m/strong_generalization_set_timestamped.csv", help="Path to the training data CSV file")
 parser.add_argument("--gpt_version", default="gpt-4-1106-preview", help="GPT model version")
-parser.add_argument("--max_tokens", type=int, default=300, help="Maximum number of tokens for the response")
-parser.add_argument("--num_samples", type=int, default=1, help="Maximum number of tokens for the response")
+parser.add_argument("--max_tokens", type=int, default=600, help="Maximum number of tokens for the response")
+parser.add_argument("--len", type=int, default=400, help="Maximum number of tokens for the response")
 parser.add_argument("--debug", action='store_true', help="Whether to run in debug mode")
+parser.add_argument("--data_name", default = 'ml-1m', help="Name of the dataset to use")
+parser.add_argument("--save_path", default = '', help="Name of the dataset to use")
+parser.add_argument("--books", action='store_true', help="Whether to run in books prompt")
+
+args = parser.parse_args()
+train_data = f'../data_preprocessed/{args.data_name}/prompt_set_timestamped.csv'
 args = parser.parse_args()
 
 openai.api_key = key
@@ -53,7 +50,7 @@ def load_existing_data(file_path):
             existing_data = json.load(fp)
         return existing_data
 
-    return defaultdict(dict)
+    return {}
 
 
 def generate_prompts_recent(train_data,only_title=1,num_movies = 30): 
@@ -108,13 +105,15 @@ if __name__ == "__main__":
     prompt += "Do not comment on the year of production. Do not mention any specific movie titles.\n"
     prompt += 'Do not comment on the ratings but use qualitative speech such as the user likes, or the user does not enjoy\n'
     prompt += 'Remember you are an expert crafter of these summaries so any other expert should be able to craft a similar summary to yours given this task\n'
-    prompt += "Keep the summary short at about 200 words. The summary should have the following format:\n"
+    prompt += f"Keep the summary short at about {args.len} words. The summary should have the following format:\n"
     prompt += "Summary: {Specific details about genres the user enjoys}. {Specific details of plot points the user seems to enjoy}. \
         {Specific details about genres the user does not enjoy}. {Specific details of plot points the user does not enjoy but other users may}."
     # prompt += " The following is an example:\n"
     # prompt += demo_str  # add demonstration
 
-    prompts = generate_prompts_recent(data, 1,50)
+    prompts = generate_prompts_recent(data, 1,args.num_movies)
+
+    print(f"{len(prompts)=}")
         
     existing_data = load_existing_data(f'../saved_user_summary/ml-100k/user_summary_gpt4_new{"debug" if args.debug else ""}.json')
 
@@ -132,12 +131,8 @@ if __name__ == "__main__":
         else:
             cur_prompts = {}
         prompts_to_process[i] = {idx: user_prompt for idx, user_prompt in prompts.items() if float(idx) not in cur_prompts}
-        
-
-   
+    
     return_dict = existing_data
-    assert istype(return_dict,defaultdict)
-
     for m in range(args.num_samples): 
         print('='*50)
         print("Running sample ", m+1)
@@ -170,6 +165,6 @@ if __name__ == "__main__":
                 break
             # Save updated dict as a JSON file
             pbar.set_description(f"Saving user {idx} summary...")
-            with open(f'../saved_user_summary/ml-100k/user_summary_gpt4_new{"debug" if args.debug else ""}.json', 'w') as fp:
+            with open(f'../saved_user_summary/ml-100k/user_summary_gpt4_new{"debug" if args.debug else ""}_{args.num_movies}.json', 'w') as fp:
                 json.dump(return_dict, fp, indent=4)
 

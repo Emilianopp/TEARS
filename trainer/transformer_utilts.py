@@ -30,8 +30,12 @@ update_count =0
 
  
 
-def load_data(args,tokenizer= None, rank=0,world_size=1):
+def load_data(args,tokenizer= None, rank=0,world_size=1,prompt_p = None ):
     data_path = f'/home/mila/e/emiliano.penaloza/LLM4REC/data_preprocessed/{args.data_name}/'
+    if prompt_p is None:
+        prompt_p = f'./saved_user_summary/{args.data_name}/user_summary_gpt4_.json'
+    
+
     loader = MatrixDataLoader(data_path,args)
     
     train_data_tr,train_data = loader.load_data('train')
@@ -46,7 +50,7 @@ def load_data(args,tokenizer= None, rank=0,world_size=1):
 
     with open (f'{data_path}/profile2id.pkl','rb') as f:
         profile2id = pickle.load(f)
-    with open(f'./saved_user_summary/{args.data_name}/user_summary_gpt4_.json','r') as f:
+    with open(prompt_p,'r') as f:
         prompts = json.load(f)    
         prompts = {profile2id[int(float(k))]:v for k,v in prompts.items() } 
         #add an <eos> token to the end of the prompt
@@ -143,15 +147,7 @@ def eval_model(args,model, test_dataloader, rank, test_data_tr,precompute_embedd
             user_id_set.update(user_ids)
             item = {k: v.to(rank) for k, v in item.items()}  
             labels = item['labels']
-
-
-
             labels[labels >=1] = 1     
-                 
-
-
-
-
             if args.embedding_module == 'RecVAE':
 
                 movie_emb_clean,loss = model(item['labels_tr'],labels ,calculate_loss = True)
@@ -159,7 +155,7 @@ def eval_model(args,model, test_dataloader, rank, test_data_tr,precompute_embedd
             elif args.embedding_module == 'MacridVAE':
                 movie_emb_clean,loss = model(item['labels_tr'],labels )
                 
-            elif args.embedding_module == 'T5Vae' or args.embedding_module =='OTRecVAE' or args.embedding_module =='MacridTEARS' :
+            elif args.embedding_module == 'T5Vae' or args.embedding_module =='OTRecVAE' or args.embedding_module =='MacridTEARS' or args.embedding_module =='RecVAEGenreVAE' :
 
                 movie_emb_clean,logits_rec,logits_text,*_ = model(data_tensor=item['labels_tr'], input_ids = item['input_ids'],attention_mask = item['attention_mask'],alpha  =alpha)
             elif args.embedding_module in ['OTVae' ,'FT5RecVAE']:
@@ -187,9 +183,9 @@ def eval_model(args,model, test_dataloader, rank, test_data_tr,precompute_embedd
             if logits_rec is not None:
                 logits_rec[np.where(masked_rows > 0)] = -1e20
                 logits_text[np.where(masked_rows > 0)] = -1e20
-
-                recon_rec = logits_rec.float().cpu().numpy()
-                recon_text = logits_text.float().cpu().numpy()
+                
+                recon_rec =   logits_rec.float().cpu().numpy()
+                recon_text =  logits_text.float().cpu().numpy()
 
             
 
@@ -200,7 +196,7 @@ def eval_model(args,model, test_dataloader, rank, test_data_tr,precompute_embedd
 
             # movie_emb_clean[np.where(masked_rows > 0)] = -torch.inf
             user_ids_l.append(user_ids)
-            recon = movie_emb_clean.float().cpu().numpy()
+            recon = movie_emb_clean.float().cpu().numpy() 
             k_values = [10, 20, 50]
             #binarize labels 
             labels = labels.cpu().numpy()
@@ -391,6 +387,10 @@ def trainT5Vae(args, rec_dataloader, model, optimizer, scheduler,pbar,epoch,rank
                 loss, BCE, wasserstein_loss, BCE_rec, BCE_text, BCE_merged = loss_f(movie_emb,labels,z_rec,mu,logvar,anneal,model.module.vae,True,
                             logits_text = logits_text,logits_rec = logits_rec,prior_mu = prior_mu,prior_logvar = prior_logvar,gamma = args.gamma,train_items=train_items,epsilon  = args.epsilon)
             
+        elif 'GenreVAE' in args.embedding_module:
+            loss, BCE, wasserstein_loss, BCE_rec, BCE_text, BCE_merged = loss_f(movie_emb, logits_rec, logits_text,
+                                             labels, mu, logvar, prior_mu, prior_logvar,
+                                             None, S, anneal,args.epsilon)
         else:
             loss, BCE, wasserstein_loss, BCE_rec, BCE_text, BCE_merged = loss_f(movie_emb, logits_rec, logits_text,
                                              labels, mu, logvar, prior_mu, prior_logvar,
@@ -549,7 +549,10 @@ def parse_args(notebook = False):  # Parse command line arguments
     parser.add_argument("--num_heads", default=4, type=int)
     parser.add_argument("--lr", default=.0001, type=float)
     parser.add_argument("--epsilon", default=1, type=float)
+    parser.add_argument("--text_tau", default=1, type=float)
     parser.add_argument("--tau", default=1, type=float)
+    parser.add_argument("--rec_tau", default=1, type=float)
+    parser.add_argument("--recon_tau", default=1, type=float)
     parser.add_argument("--lr2", default=.00001, type=float)
     parser.add_argument("--gamma", default=.0035, type=float)
     parser.add_argument("--kfac", default=10, type=int)
@@ -606,7 +609,7 @@ def parse_args(notebook = False):  # Parse command line arguments
     print(f"MODEL NAME = {args.model_save_name}")
 
     current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    args.model_log_name = f"{args.model_name}_{args.data_name}_embedding_module_{args.embedding_module.replace('/','_')}_{current_time}.csv"
+    args.model_log_name = f"{args.model_name}_{args.data_name}_embedding_module_{args.embedding_module.replace('/','_')}_{current_time}_{args.seed}.csv"
     print(f"{args.model_log_name=}")
 
     directory_path = "./scratch"
