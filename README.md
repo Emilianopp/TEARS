@@ -17,10 +17,16 @@ We provide user summaries in `./saved_user_summaries`. These can be remade with
 python -m preprocess.make_in_context_data --data_name=${data_name}
 ```
 
+To simply use the preprocessed data directly first run:
+
+```bash
+tar xvzf data_preprocessed.tar.gz
+```
+
 ## Execution 
 We provide an example execution command below, but note other examples given in `/execute`
 
-We implemment `EASE`,`MVAE`,`MDAE`, `MacridVAE`,`RecVAE` and their appropriate TEARS models
+We implement `EASE`,`MVAE`,`MDAE`, `MacridVAE`,`RecVAE` and their appropriate TEARS models
 
 To execute the training pipeline run:
 
