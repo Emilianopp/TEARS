@@ -64,4 +64,5 @@ def MRR_at_k(X_pred, heldout_batch, k=100, mean = True):
                         idx_topk] * tp).max(axis=1)
 
     return np.mean(RR) if mean else RR
-    
+
+

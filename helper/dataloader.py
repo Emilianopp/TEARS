@@ -1,143 +1,56 @@
-import json
-import pandas as pd 
+import ast
+import pandas as pd
 import pickle
 import numpy as np
-from torch.nn.functional import one_hot
-from scipy.sparse import csr_matrix
-from collections import defaultdict
 import torch
 from torch.utils.data import Dataset, DataLoader
-import random
-import os 
+import os
 from scipy import sparse
-
-def drop_words(prompts, augmented_data):
-    dropped_prompts = []
-
-    for prompt in prompts:
-
-        words = prompt.split()
-        num_words = len(words)
-        num_dropped = int(num_words * augmented_data)
-        if num_dropped > 0:
-            dropped_words = random.sample(words, num_dropped)
-            dropped_prompt = ' '.join([word for word in words if word not in dropped_words])
-            dropped_prompts.append(dropped_prompt)
-        else:
-            dropped_prompts.append(prompt)
-
-    
-    return dropped_prompts
-
 
 
 class DataMatrix(Dataset):
-    def __init__(self, train_matrix,encodings,indecis,tokenizer,prompts,mask):
+    def __init__(self, train_matrix, train_matrix_tr, encodings, indecis, user_id_to_row):
         self.train_matrix = naive_sparse2tensor(train_matrix)
+        self.train_matrix_tr = naive_sparse2tensor(train_matrix_tr)
         self.indices = indecis
-        self.prompts = prompts
-        self.tokenizer =tokenizer
-        self.mask = mask
-
-
         self.encodings = encodings
-    def __len__(self):
+        self.user_id_to_row = user_id_to_row
 
+    def __len__(self):
         return len(self.indices)
 
     def __getitem__(self, idx):
-
         row = self.indices[idx]
-        if self.tokenizer is not None: 
-
-            agumented_prompts = drop_words([self.prompts[row]], self.mask)
-            item = self.tokenizer(agumented_prompts, add_special_tokens=True,return_tensors = 'pt')
-
-            original = self.tokenizer([self.prompts[row]], add_special_tokens=True,return_tensors = 'pt')
-
-            item['original_input_ids'] = original['input_ids']
-            item['original_attention_mask'] = original['attention_mask']
-        else:    
-            item = self.encodings[row]
-        
+        item = self.encodings[row]
         label_tensor = self.train_matrix[row]
-
+        item['labels_tr'] = self.train_matrix_tr[row]
+        # idx here is equivalent to user_id
         item['idx'] = torch.tensor([row])
         item['labels'] = label_tensor
 
-        return  item
-
-
-def custom_collator(batch):
-    input_ids = [item['input_ids'] for item in batch]
-
- 
-    
-    attention_mask = [item['attention_mask'] for item in batch]
-    labels = [item['labels'] for item in batch]
-    idx = [item['idx'] for item in batch]
-    if 'original_input_ids' in batch[0]:
-        original_input_ids = [item['original_input_ids'] for item in batch]
-
-        original_mask = [item['original_attention_mask'] for item in batch]
-        
-
-        input_ids = input_ids   + original_input_ids
-        attention_mask = attention_mask + original_mask
-        labels = labels + labels
-        idx = idx+ idx
-
-
-
-    # Determine the maximum length from all sequences
-    max_length = max(ids.shape[1] for ids in input_ids)  # Assuming ids have shape [1, seq_length]
-
-    # Function to pad tensors to the max_length, handling 2D tensors
-    def pad_tensor(tensor, length):
-        # Calculate padding length
-        pad_length = length - tensor.shape[1]
-        # Pad the tensor to the right along the sequence length dimension
-        return torch.cat([tensor, torch.zeros(1, pad_length, dtype=tensor.dtype)], dim=1)
-
-    # Pad input_ids and attention_mask, ensuring they are 2D tensors of shape [1, max_length]
-    padded_input_ids = torch.stack([pad_tensor(ids, max_length) for ids in input_ids], dim=0).squeeze(1)
-    padded_attention_mask = torch.stack([pad_tensor(mask, max_length) for mask in attention_mask], dim=0).squeeze(1)
-
-    # Handling labels and idx, assuming they are already appropriately shaped or scalar values
-    labels_tensor = torch.tensor(labels, dtype=torch.long) if not all(isinstance(l, torch.Tensor) for l in labels) else torch.stack(labels)
-    idx_tensor = torch.tensor(idx, dtype=torch.long) if not all(isinstance(i, torch.Tensor) for i in idx) else torch.stack(idx)
-
-    return {
-        'input_ids': padded_input_ids,
-        'attention_mask': padded_attention_mask,
-        'labels': labels_tensor,
-        'idx': idx_tensor
-    }
-
-
-
+        return item
 
 
 class MatrixDataLoader():
-    '''
-    Load Movielens-20m dataset
-    '''
-    def __init__(self, path):
+    def __init__(self, path, args):
         self.pro_dir = path
-        assert os.path.exists(self.pro_dir), "Preprocessed files does not exist. Run data.py"
+        self.args = args
+
+        assert os.path.exists(
+            self.pro_dir), "Preprocessed files does not exist. Run data.py"
 
         self.n_items = self.load_n_items()
-    
-    def load_data(self, datatype='train'):
+
+    def load_data(self, datatype='train', head=None):
         if datatype == 'train':
-            return self._load_train_data()
+            return self._load_train_data(head=head)
         elif datatype == 'validation':
-            return self._load_tr_te_data(datatype)
+            return self._load_tr_te_data(datatype, head=head)
         elif datatype == 'test':
-            return self._load_tr_te_data(datatype)
+            return self._load_tr_te_data(datatype, head=head)
         else:
             raise ValueError("datatype should be in [train, validation, test]")
-        
+
     def load_n_items(self):
         unique_sid = list()
         with open(os.path.join(self.pro_dir, 'unique_sid.txt'), 'r') as f:
@@ -145,100 +58,128 @@ class MatrixDataLoader():
                 unique_sid.append(line.strip())
         n_items = len(unique_sid)
         return n_items
-    
-    def _load_train_data(self):
+
+    def _load_train_data(self, head=50):
+
         path = os.path.join(self.pro_dir, 'train.csv')
 
-        
         tp = pd.read_csv(path)
-
         self.n_users = tp['uid'].max() + 1
+        tp_tr = tp.groupby('uid').apply(
+            lambda x: x.head(head)).reset_index(drop=True)
+        rows, cols, rating = tp_tr['uid'], tp_tr['sid'], tp_tr['rating']
 
-        rows, cols,rating  = tp['uid'], tp['sid'],tp['rating']
-    
-        non_binary_data = sparse.csr_matrix((rating,
-                                 (rows, cols)), dtype='float64',
-                                 shape=(self.n_users, self.n_items))
-        
-
-        tp = tp[tp['rating'] > 3]   
-        #get the most recent 50 items for each user
-        #for each user sample 50 random movies 
-        
-        # tp = tp.groupby('uid').apply(lambda x: x.head(50)).reset_index(drop=True)
-
-        
-
+        # Ratings as input
+        data_tr = sparse.csr_matrix((np.ones_like(rows) if self.args.binarize else rating,
+                                     (rows, cols)), dtype='float64',
+                                    shape=(self.n_users, self.n_items))
+        # Implicif feedback as target
+        tp = tp[tp['rating'] > 3]
         rows, cols = tp['uid'], tp['sid']
-        data = sparse.csr_matrix((np.ones_like(rows),
-                                 (rows, cols)), dtype='float64',
-                                 shape=(self.n_users, self.n_items))
-        return data,non_binary_data
-    
-    def _load_tr_te_data(self, datatype='test'):
+        data_te = sparse.csr_matrix((np.ones_like(rows),
+                                     (rows, cols)), dtype='float64',
+                                    shape=(self.n_users, self.n_items))
+
+        return data_tr, data_te
+
+    def _load_tr_te_data(self, datatype='test', head=None):
         tr_path = os.path.join(self.pro_dir, '{}_tr.csv'.format(datatype))
         te_path = os.path.join(self.pro_dir, '{}_te.csv'.format(datatype))
-
         tp_tr = pd.read_csv(tr_path)
         tp_te = pd.read_csv(te_path)
-        
-        rows_tr, cols_tr,rating_tr = tp_tr['uid'] , tp_tr['sid'], tp_tr['rating']
-        rows_te, cols_te,rating_te = tp_te['uid'], tp_te['sid'], tp_te['rating']
 
+        rows_tr, cols_tr, rating_tr = tp_tr['uid'], tp_tr['sid'], tp_tr['rating']
 
-        data_tr = sparse.csr_matrix((np.ones_like(rows_tr),
+        rows_te, cols_te, rating_te = tp_te['uid'], tp_te['sid'], tp_te['rating']
+
+        # use ratings as input
+        data_tr = sparse.csr_matrix((np.ones_like(rows_tr) if self.args.binarize else rating_tr,
                                     (rows_tr, cols_tr)), dtype='float64', shape=(self.n_users, self.n_items))
+        # test items are simply binary feedback
         data_te = sparse.csr_matrix((np.ones_like(rows_te),
                                     (rows_te, cols_te)), dtype='float64', shape=(self.n_users, self.n_items))
-        data_tr_rating = sparse.csr_matrix((rating_tr,
-                                    (rows_tr, cols_tr)), dtype='float64', shape=(self.n_users, self.n_items))
-        data_te_rating = sparse.csr_matrix((rating_te,
-                                    (rows_te, cols_te)), dtype='float64', shape=(self.n_users, self.n_items))
-        
-        return data_tr, data_te,data_tr_rating,data_te_rating
+
+        return data_tr, data_te
+
 
 def naive_sparse2tensor(data):
     return torch.FloatTensor(data.toarray())
 
-   
 
-def map_title_to_id(movies_file):
-    data = pd.read_csv(movies_file,sep="::",names=["movieId","title","genre"],encoding='ISO-8859-1')
-    mapping = {}
-    for index, row in data.iterrows():
-        mapping[row['title']] = row['movieId']
+def map_id_to_title(data='ml-1m'):
+    if data == 'ml-1m':
+
+        data = pd.read_csv('./data/ml-1m/movies.dat', sep="::",
+                           names=["itemId", "title", "genre"], encoding='ISO-8859-1')
+        with open('./data_preprocessed/ml-1m/show2id.pkl', 'rb') as f:
+            item_id_map = pickle.load(f)
+        mapping = {}
+        for index, row in data.iterrows():
+            if row['itemId'] in item_id_map:
+                mapping[item_id_map[row['itemId']]] = row['title']
+
+        return mapping
+    elif data == 'netflix':
+
+        with open('./data_preprocessed/netflix/show2id.pkl', 'rb') as f:
+            item_id_map = pickle.load(f)
+        df = pd.read_csv('./data/netflix/netflix_genres.csv')
+
+        mapping = {}
+
+        for index, row in df.iterrows():
+            if row['movieId'] in item_id_map:
+                mapping[item_id_map[row['movieId']]] = row['title']
+
+    elif data == 'goodbooks':
+        df = pd.read_csv('./data/goodbooks/genres.csv')
+        df.genres = df.genres.apply(ast.literal_eval)
+
+        mapping = {}
+        with open('./data_preprocessed/goodbooks/show2id.pkl', 'rb') as f:
+            item_id_map = pickle.load(f)
+        for index, row in df.iterrows():
+            if row['book_id'] in item_id_map:
+                mapping[item_id_map[row['book_id']]] = row['title']
+
     return mapping
 
-def map_id_to_title(data_file,data = 'ml-1m'):
-    if data == 'ml-1m':
-        data = pd.read_csv(data_file,sep="::",names=["itemId","title","genre"],encoding='ISO-8859-1')
 
+def map_id_to_genre(data='ml-1m'):
+    if data == 'ml-1m':
+        data = pd.read_csv('./data/ml-1m/movies.dat', sep="::",
+                           names=["itemId", "title", "genre"], encoding='ISO-8859-1')
+        with open('./data_preprocessed/ml-1m/show2id.pkl', 'rb') as f:
+            item_id_map = pickle.load(f)
         mapping = {}
         for index, row in data.iterrows():
-            
-            mapping[row['itemId']] = row['title']
+            if row['itemId'] in item_id_map:
+                genres = row['genre'].lower().replace('-', ' ').split('|')
+                mapping[item_id_map[row['itemId']]] = genres
 
-        return mapping
-    elif data == 'books': 
-        df = pd.read_csv(data_file)
-        return df.set_index('sid').to_dict()['title']
-        
-        
-        
+    elif data == 'netflix':
 
-def map_id_to_genre(path= './data/ml-1m/movies.dat',data='ml-1m'):
-    if data == 'ml-1m':
-        data = pd.read_csv(path,sep="::",names=["itemId","title","genre"],encoding='ISO-8859-1')
+        with open('./data_preprocessed/netflix/show2id.pkl', 'rb') as f:
+            item_id_map = pickle.load(f)
+
+        df = pd.read_csv('./data/netflix/netflix_genres.csv')
 
         mapping = {}
-        for index, row in data.iterrows():
-            
-            mapping[row['itemId']] = row['genre']
 
-        return mapping
-    elif data =='books': 
-        df = pd.read_csv(path)
-        return df.set_index('sid').to_dict()['genres']
+        for index, row in df.iterrows():
+            if row['movieId'] in item_id_map:
+                mapping[item_id_map[row['movieId']]
+                        ] = row['genres'].lower().replace('-', ' ').split('|')
 
+    elif data == 'goodbooks':
+        df = pd.read_csv('./data/goodbooks/genres.csv')
+        df.genres = df.genres.apply(ast.literal_eval)
 
-  
+        mapping = {}
+        with open('./data_preprocessed/goodbooks/show2id.pkl', 'rb') as f:
+            item_id_map = pickle.load(f)
+        for index, row in df.iterrows():
+            if row['book_id'] in item_id_map:
+                mapping[item_id_map[row['book_id']]] = row['genres']
+
+    return mapping
