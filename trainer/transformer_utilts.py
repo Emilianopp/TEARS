@@ -83,7 +83,7 @@ def get_dataloader(data, train_data_tr, rank, world_size, bs, encodings, nonzer_
     return rec_dataloader
 
 
-def get_embeddings(args, model, item, rank, vae=False, alpha=0.5):
+def get_embeddings(args, model, item,  alpha=0.5):
     logits_rec, logits_text = None, None
 
     if args.embedding_module == 'TearsBase':
@@ -131,7 +131,7 @@ def gather_metrics(metrics, mult_process, world_size):
         return np.mean(sum(metrics, []))
 
 
-def eval_model(args, model, test_dataloader, rank,  mult_process=True, world_size=2, vae=False, alpha=0.5):
+def eval_model(args, model, test_dataloader, rank,  mult_process=True, world_size=2,  alpha=0.5):
     torch.cuda.set_device(rank)
     model.to(rank)
     metrics = defaultdict(list)
@@ -144,7 +144,7 @@ def eval_model(args, model, test_dataloader, rank,  mult_process=True, world_siz
             item = {k: v.to(rank) for k, v in item.items()}
             labels = item['labels']
             movie_emb_clean, logits_rec, logits_text = get_embeddings(
-                args, model, item, rank, vae, alpha)
+                args, model, item, alpha)
             mask = np.where(item['labels_tr'].cpu().numpy() > 0)
             recon = movie_emb_clean.float().cpu().numpy()
             recon[mask] = -1e20
@@ -290,25 +290,18 @@ def get_scheduler(optimizer, args):
 
 
 def parse_args(notebook=False):  # Parse command line arguments
-    parser = argparse.ArgumentParser(description="LLM4RecSys")
+    parser = argparse.ArgumentParser(description="TEARS")
     parser.add_argument("--data_name", default='ml-1m', type=str)
+    parser.add_argument("--vae_path", type=str)
     parser.add_argument("--model_name", default='Transformer', type=str)
-    parser.add_argument("--embedding_module",
-                        default="microsoft/phi-2", type=str)
+    parser.add_argument("--embedding_module",default="MVAE", type=str)
     parser.add_argument("--scheduler", default='None', type=str)
-    parser.add_argument("--embedding_dim", default=1536, type=int)
-    parser.add_argument("--bs", default=8, type=int)
+    parser.add_argument("--bs", default=64, type=int)
     parser.add_argument("--seed", default=2024, type=int)
     parser.add_argument("--max_anneal_steps", default=10000, type=int)
-    parser.add_argument("--top_for_rerank", default=50, type=int)
-    parser.add_argument("--num_layers", default=3, type=int)
-    parser.add_argument("--num_layers_transformer", default=3, type=int)
-    parser.add_argument("--batch_size", default=4, type=int)
     parser.add_argument("--epochs", default=3, type=int)
     parser.add_argument("--topk", default=20, type=int)
-    parser.add_argument("--update_every", default=16, type=int)
     parser.add_argument("--wandb", action='store_true')
-    parser.add_argument("--num_neg", default=1, type=int)
     parser.add_argument("--epsilon", default=1, type=float)
     parser.add_argument("--tau", default=1, type=float)
     parser.add_argument("--text_tau", default=1, type=float)
@@ -324,42 +317,37 @@ def parse_args(notebook=False):  # Parse command line arguments
     parser.add_argument("--dropout", default=.1, type=float)
     parser.add_argument("--anneal", default=True, type=bool)
     parser.add_argument('--debug', action='store_true')
-    parser.add_argument('--loss', default='bce_softmax',
-                        type=str, choices=['bce', 'bce_softmax', 'kl'])
-    parser.add_argument("--max_steps", type=int, default=5)
+    parser.add_argument('--loss', default='bce_softmax',type=str, choices=['bce', 'bce_softmax', 'kl'])
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--total_steps", type=int, default=1)
     parser.add_argument("--beta", type=float, default=1)
     parser.add_argument("--lora_alpha", type=int, default=16)
     parser.add_argument('--eval_control', action='store_true')
-    parser.add_argument('--debug_prompts', action='store_true')
-    parser.add_argument('--EASE', action='store_true')
     parser.add_argument('--binarize', action='store_true')
     parser.add_argument('--nogb', action='store_true')
     parser.add_argument('--KLD', action='store_true')
+    parser.add_argument('--scratch', action='store_true')
     parser.add_argument('--mask_control_labels', action='store_true')
-
     args = parser.parse_args() if not notebook else parser.parse_args(args=[])
-    args.recon = False
     args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    args.model_save_path = f'/home/mila/e/emiliano.penaloza/scratch/saved_model/{args.data_name}/{args.model_name}'
-
-    args.model_save_name = f"{args.model_save_path}/best_model_lr_{args.lr}_embedding_module_{args.embedding_module.replace('/','_')}_"
-    print(f"MODEL NAME = {args.model_save_name}")
+    
 
     current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    args.model_log_name = f"{args.model_name}_{args.data_name}_embedding_module_{args.embedding_module.replace('/','_')}_{current_time}_{args.seed}.csv"
-    print(f"{args.model_log_name=}")
+    args.model_log_name = f"{args.embedding_module.replace('/','_')}_{args.data_name}_{current_time}_{args.seed}"
+    print(f'Model will be saved under the name {args.model_log_name }')
 
-    directory_path = "./scratch"
+    directory_path = "../scratch"
 
     if os.path.exists(directory_path) and os.path.isdir(directory_path):
         print(
             f"The directory '{directory_path}' exists. Will save all weights and models there")
-        args.scratch = './scratch'
-
+        args.scratch = '../scratch'
+        #automatically set transformer cache to scratch directory
+        os.environ['TRANSFORMERS_CACHE'] = args.scratch
+        os.environ['HF_HOME'] = args.scratch
+        os.environ['HF_DATASETS_CACHE'] = args.scratch
+        os.environ['TORCH_HOME'] = args.scratch
     else:
         args.scratch = '.'
-    args.scratch = '/home/mila/e/emiliano.penaloza/scratch'
 
     return args

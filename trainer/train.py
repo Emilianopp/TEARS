@@ -14,11 +14,6 @@ from trainer.transformer_utilts import *
 import sys
 import os
 import random 
-PATH = '/home/user/NEW_MODEL_CACHE/'
-os.environ['TRANSFORMERS_CACHE'] = '/home/mila/e/emiliano.penaloza/scratch/'
-os.environ['HF_HOME'] = '/home/mila/e/emiliano.penaloza/scratch/models'
-os.environ['HF_DATASETS_CACHE'] = '/home/mila/e/emiliano.penaloza/scratch/models'
-os.environ['TORCH_HOME'] = '/home/mila/e/emiliano.penaloza/scratch/models'
 sys.path.append("..")
 
 
@@ -131,7 +126,7 @@ def train_fun(rank, world_size, args):
         if e % 1 == 0:
 
             outputs = eval_model(args, model, val_dataloader,
-                                 rank, world_size=world_size, vae=True)
+                                 rank, world_size=world_size)
             if not args.debug:
                 val_outputs = {f'val_{k}': v for k, v in outputs.items()}
                 wandb.log({**val_outputs})
@@ -180,9 +175,9 @@ def train_fun(rank, world_size, args):
 
     
     val_outputs = eval_model(args, model, val_dataloader,
-                             rank, world_size=world_size, vae=True)
+                             rank, world_size=world_size)
     test_outputs = eval_model(
-        args, model, test_dataloader, rank, world_size=world_size, vae=True)
+        args, model, test_dataloader, rank, world_size=world_size)
     test_outputs = {f'test_{k}': v for k, v in test_outputs.items()}
     val_outputs = {f'val_{k}': v for k, v in val_outputs.items()}
     end_time = time.time()
@@ -208,9 +203,9 @@ def train_fun(rank, world_size, args):
                     model, item_title_dict, item_genre_dict, tokenizer, 0, args, alpha=0)
                 max_alpha = 0
                 metrics = eval_model(args, model, test_dataloader, rank,
-                                     world_size=world_size, vae=True, mult_process=False, alpha=0)
+                                     world_size=world_size, alpha=0)
                 up, down = eval_model_obj.evaluate(
-                    test_dataloader, prompts, 20, rank=0)
+                    test_dataloader, prompts, 20, rank=rank)
                 ups[module].append(-up)
                 downs[module].append(down)
 
@@ -222,11 +217,11 @@ def train_fun(rank, world_size, args):
                 for alpha in alphas:
 
                     n2_track = eval_model(args, model, val_dataloader, rank, world_size=world_size,
-                                          vae=True, mult_process=False, alpha=alpha)['ndcg@20']
+                                          alpha=alpha)['ndcg@20']
                     eval_model_obj.alpha = alpha
                     eval_model_obj.alpha2 = alpha
                     up, down = eval_model_obj.evaluate(
-                        test_dataloader, prompts, 20, rank=0)
+                        test_dataloader, prompts, 20, rank=rank)
                     ndcgs20[module].append(n2_track)
                     ups[module].append(-up)
                     downs[module].append(down)
@@ -234,7 +229,7 @@ def train_fun(rank, world_size, args):
 
                 max_alpha = max(ndcgs, key=ndcgs.get)
                 metrics = eval_model(args, model, test_dataloader, rank,
-                                     world_size=world_size, vae=True, mult_process=False, alpha=max_alpha)
+                                     world_size=world_size,  alpha=max_alpha)
 
             out_metrics[module] = metrics
 

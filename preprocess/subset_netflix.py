@@ -46,4 +46,4 @@ def trim_to_target_users(df, k, m, target_users=10000, delta=100):
 
 filtered_df = trim_to_target_users(df, k=100, m=100)
 
-filetered_df.to_csv('./data/netflix/ratings_filtered.csv', index=False)
+filtered_df.to_csv('./data/netflix/ratings_filtered.csv', index=False)

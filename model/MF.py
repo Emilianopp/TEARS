@@ -21,13 +21,6 @@ from copy import deepcopy
 
 
 class MultiDAE(nn.Module):
-    """
-    Container module for Multi-DAE.
-
-    Multi-DAE : Denoising Autoencoder with Multinomial Likelihood
-    See Variational Autoencoders for Collaborative Filtering
-    https://arxiv.org/abs/1802.05814
-    """
 
     def __init__(self, p_dims, q_dims=None, dropout=0.5):
         super(MultiDAE, self).__init__()
@@ -72,20 +65,12 @@ class MultiDAE(nn.Module):
 
 
 class MultiVAE(nn.Module):
-    """
-    Container module for Multi-VAE.
-
-    Multi-VAE : Variational Autoencoder with Multinomial Likelihood
-    See Variational Autoencoders for Collaborative Filtering
-    https://arxiv.org/abs/1802.05814
-    """
 
     def __init__(self, p_dims, q_dims=None, dropout=0.5):
         super(MultiVAE, self).__init__()
         self.p_dims = p_dims
         if q_dims:
-            # assert q_dims[0] == p_dims[-1], "In and Out dimensions must equal to each other"
-            # assert q_dims[-1] == p_dims[0], "Latent dimension for p- and q- network mismatches."
+
             self.q_dims = q_dims
         else:
             self.q_dims = p_dims[::-1]
@@ -230,7 +215,7 @@ class MacridVAE(nn.Module):
     def set_item_weights_copy(self):
         self.decoder_emb = deepcopy(self.item_embeddings.weight)
         self.item_embeddings.requires_grad = False
-        # self.decoder_emb.requires_grad = False
+        
     def encode(self, input_rating):
         items = F.normalize(self.item_embeddings.weight, dim=1)  # [N, d]
         prototypes = F.normalize(self.prototype_embeddings.weight, dim=1)  # [num_prototypes, emb_size]
@@ -1144,13 +1129,8 @@ def get_RecVAE(args,num_movies):
 def get_TearsVAE(args,num_movies):
     pdims = [args.emb_dim,num_movies]
     vae =  MultiVAE(pdims, dropout = args.dropout)
-    if args.data_name =='ml-1m':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_VAE_2024-04-27_21-08-15.csv.pt'
-    elif args.data_name =='netflix':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_VAE_2024-05-02_14-27-25.csv.pt'
-    elif args.data_name == 'goodbooks':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_VAE_2024-05-26_17-30-51.csv.pt'
     state_dict = torch.load(p)
+    p = f'{args.scratch}/saved_model/{args.data_name}/{args.vae_path}'
     vae.load_state_dict(state_dict)
     model = TearsVAE.from_pretrained('google-t5/t5-base',num_labels=num_movies, epsilon = args.epsilon,args = args)
     lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
@@ -1165,19 +1145,9 @@ def get_TearsVAE(args,num_movies):
 def get_t5RecVAE(args,num_movies): 
     pdims = [args.emb_dim,num_movies]
     prior =  RecVAE(pdims, dropout = args.dropout,gamma= args.gamma)
-    if args.data_name == 'netflix':
-
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_RecVAE_2024-05-02_14-54-48.csv.pt'
-    elif args.data_name =='ml-1m':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_RecVAE_2024-05-02_13-10-49.csv.pt'
-
-    elif args.data_name =='goodbooks':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_RecVAE_2024-05-24_11-57-20.csv.pt'
-
-        
+    p = f'{args.scratch}/saved_model/{args.data_name}/{args.vae_path}'
     state_dict = torch.load(p)
     prior.load_state_dict(state_dict)
-
     lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
                             target_modules=['q','v','k'],
                             modules_to_save=['classification_head','mlp','RecVAE','Encoder','CompositePrior','concat_mlp'])
@@ -1192,16 +1162,8 @@ def get_t5RecVAE(args,num_movies):
 
 def get_MacridTEARS(args,num_movies): 
     args.dfac = args.emb_dim//args.kfac
-    
     vae = MacridVAE(num_movies,args)
-    if args.data_name =='ml-1m':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_MacridVAE_2024-05-10_15-07-31.csv.pt'
-    elif args.data_name == 'netflix':
-        
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_MacridVAE_2024-05-11_11-36-07.csv.pt'
-    elif args.data_name =='goodbooks':
-        
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_MacridVAE_2024-05-27_12-56-52.csv.pt'
+    p = f'{args.scratch}/saved_model/{args.data_name}/{args.vae_path}'
     vae.load_state_dict(torch.load(p))
     vae.set_item_weights_copy()
     lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
@@ -1212,7 +1174,6 @@ def get_MacridTEARS(args,num_movies):
     model = MacridTEARS.from_pretrained('google-t5/t5-base',args = args,num_labels=num_movies, 
                                   
                                   epsilon = args.epsilon)
-    
     model = get_peft_model(model, lora_config)
     model.set_vae( vae )
     return model 
@@ -1220,45 +1181,28 @@ def get_MacridTEARS(args,num_movies):
 def get_GenreTEARS(args,num_movies):
     id_to_genre = map_id_to_genre(args.data_name)
     genre_s = set()
-    #the values of the list are olists of genres 
     for key in id_to_genre.keys():
         [genre_s.add(g) for g in id_to_genre[key]]
     num_genres = len(genre_s)
-
     model = GenreTEARS(num_genres=num_genres,
                        genres_l = list(genre_s),
                        num_movies=num_movies,genre_map = id_to_genre,epsilon = args.epsilon,dropout= args.dropout)
-    
     return model
 
 def get_GenreVAE(args,num_movies): 
     pdims = [args.emb_dim,num_movies]
-    # print(f"{num_movies=}")
-
     prior =  RecVAE(pdims, dropout = args.dropout,gamma= args.gamma)
-    if args.data_name == 'netflix':
-        # print('netflix')
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_RecVAE_2024-05-02_14-54-48.csv.pt'
-    elif args.data_name =='ml-1m':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_RecVAE_2024-05-02_13-10-49.csv.pt'
-        # p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_RecVAE_2024-04-27_15-53-38.csv.pt'
-    elif args.data_name =='goodbooks':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_RecVAE_2024-05-24_11-57-20.csv.pt'
-
-        
+    p = f'{args.scratch}/saved_model/{args.data_name}/{args.vae_path}'
     state_dict = torch.load(p)
     prior.load_state_dict(state_dict)
-    # classifier =  RecVAE(pdims, dropout = args.dropout)
     id_to_genre = map_id_to_genre(args.data_name)
     genre_s = set()
-    #the values of the list are olists of genres 
     for key in id_to_genre.keys():
         [genre_s.add(g) for g in id_to_genre[key]]
     num_genres = len(genre_s)
     model = GenreVae(num_genres=num_genres, 
                                   genre_map=id_to_genre,prior = None,
                                   genres_l = list(genre_s), epsilon = args.epsilon,concat = args.concat,num_movies = num_movies)
-    # model = get_peft_model(model, lora_config)
     model.set_vae( prior )
     
 

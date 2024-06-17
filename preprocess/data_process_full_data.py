@@ -7,6 +7,9 @@ from collections import OrderedDict
 import argparse 
 #silence warnings
 import warnings
+from ast import literal_eval
+import numpy as np 
+
 warnings.filterwarnings("ignore")
 
 
@@ -19,6 +22,54 @@ parser.add_argument('--timestamp', action='store_true')
 
 args = parser.parse_args()
 data_name = args.data_name
+
+def preprocess_good_reads():
+    ratings = pd.read_csv( '.data/goodbooks/ratings.csv')
+    
+    
+    #genres obtained thanks to the contribution of the repository below
+    genres = pd.read_csv('https://raw.githubusercontent.com/malcolmosh/goodbooks-10k/master/books_enriched.csv', index_col=[0], converters={"genres": literal_eval})[['book_id', 'genres']]
+
+    ratings = ratings.merge(genres, on='book_id', how='left')
+    languages =['eng','en-US','en-GB','en-CA']
+    book_cols = ['book_id','language_code','title','authors','work_id']
+    books = books[book_cols]
+    books = books[books.language_code.isin(languages)]
+
+
+
+    ratings = ratings.merge(books, left_on='book_id',right_on= 'book_id',how = 'inner')
+    subset_ratings = ratings.groupby('book_id').filter(lambda x: len(x) >= 20)
+    subset_ratings = subset_ratings.reset_index(drop=True)
+    subset_ratings = ratings.groupby('user_id').filter(lambda x: len(x) >= 20)
+    
+    #set the seed for reproducibility
+    np.random.seed(2024)
+    #sample 10k users interactioons
+    users = set(subset_ratings.user_id.unique())
+    sample_users = np.random.choice(list(users),10000,replace=False)
+    subset_ratings = subset_ratings[subset_ratings.user_id.isin(sample_users)]
+    
+    #delete items that appear less than 20 times 
+    items = set(subset_ratings.book_id.unique())
+    items = list(items)
+    items_count = subset_ratings.groupby('book_id').size()
+    items_count = items_count[items_count >= 20]
+    items = items_count.index
+    subset_ratings = subset_ratings[subset_ratings.book_id.isin(items)]
+    #enumerate the user ids and item ids 
+    user_ids = subset_ratings.user_id.unique()
+    user2id = {user_id: i for i, user_id in enumerate(user_ids)}
+    item_ids = subset_ratings.book_id.unique()
+    item2id = {item_id: i for i, item_id in enumerate(item_ids)}
+    subset_ratings['user_id'] = subset_ratings['user_id'].map(user2id)
+    subset_ratings['book_id'] = subset_ratings['book_id'].map(item2id)
+    return subset_ratings
+
+
+
+
+    
 
 def save_sorted_json(data, filename):
     sorted_data = OrderedDict(sorted(data.items(), key=lambda t: t[0]))
@@ -206,7 +257,8 @@ if __name__ == "__main__":
         train_data, val_data, test_data,promp_set,non_users = generate_train_val_test_splits(ratings, k)
     elif data_name == 'goodbooks':
         ratings_file = './data/goodbooks/ratings.csv'
-        ratings = pd.read_csv(ratings_file)
+        ratings = preprocess_good_reads()
+
         #remove cold start items
         ratings = ratings[ratings['book_id'].isin(ratings['book_id'].value_counts()[ratings['book_id'].value_counts()>10].index)]
         

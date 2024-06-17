@@ -1,20 +1,52 @@
-# LLM4Rec_User_Summary
-Use LLM to build Conv RecSys. 
+# TEARS
+
+Text Representations for Scrutable Recommendations (link to come)
 
 
-## important notes
-
-When testing the model to see if it predicts all items correctly remember the model is only trained on ratings that are larger than four. Therefore the naive training recall is much worse. Need to compare to those that are not naive i.e larger than four
+![Description](./figures/tears_fig.svg)
 
 
-## Ideas for 
-Should consider where to go next. This is a baseline interpretation but how can you make this more autonomous a better agent for discory. Probably going to have to take a more conversational approach like the one olivier was suggesting
+## Data 
+We provide detailed instructions on how to reproduce the datasets used in the [data](data/README.md) directory
 
+## User Summaries
 
-## Experiments 
+We provide user summaries in `./saved_user_summaries`. These can be remade with 
 
-To run aany experiment simply run 
-
+```bash
+python -m preprocess.make_in_context_data --data_name=${data_name}
 ```
-pythom -m  experiment.FILE
+
+## Execution 
+We provide an example execution command below, but note other examples given in `/execute`
+
+We implemment `EASE`,`MVAE`,`MDAE`, `MacridVAE`,`RecVAE` and their appropriate TEARS models
+
+To execute the training pipeline run:
+
+```bash
+python -m trainer.train \
+    --seed=2024 \
+    --embedding_module=${module} \
+    --data_name=${dataset} \
+    --dropout=.4 \
+    --epochs=30 \
+    --lora_alpha=16 \
+    --lora_r=64 \
+    --bs=64 \
+    --lr=.0001 \
+    --scheduler=None \
+    --epsilon=.5 \
+    --eval_control \
+    --wandb
 ```
+
+## Acknowledgements
+
+We thank the authors of the following repositories for their useful codebases that where a key role in the execution of this project: 
+
+`MVAE/MDAE` [https://github.com/younggyoseo/vae-cf-pytorch](https://github.com/younggyoseo/vae-cf-pytorch)
+
+`RecVAE` [https://github.com/ilya-shenbin/RecVAE](https://github.com/ilya-shenbin/RecVAE)
+
+`MacridVAE` (adapted to torch from) [https://jianxinma.github.io/disentangle-recsys.html](https://jianxinma.github.io/disentangle-recsys.html)
