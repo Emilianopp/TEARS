@@ -1,24 +1,3 @@
-import pandas as pd
-import json
-import random
-import os
-from collections import OrderedDict
-import argparse 
-#silence warnings
-import warnings
-warnings.filterwarnings("ignore")
-
-
-
-parser = argparse.ArgumentParser(description='Generate train, validation, and test splits for MovieLens dataset.')
-parser.add_argument('--data_name', type=str, choices=['ml-1m', 'ml-100k'], default='ml-100k',
-                        help='Name of the MovieLens dataset (ml-1m or ml-100k). Default is ml-1m.')
-parser.add_argument('--timestamp', action='store_true')
-
-
-args = parser.parse_args()
-data_name = args.data_name
-
 def save_sorted_json(data, filename):
     sorted_data = OrderedDict(sorted(data.items(), key=lambda t: t[0]))
     with open(filename, 'w') as f:
@@ -56,8 +35,8 @@ def load_movie_titles_from_dat(file_path):
         movie_titles.add(title)
     return movie_titles
 
-def filter_movie_titles_by_valid_set(movies, valid_movie_titles):
-    return [movie for movie in movies if movie['title'] in valid_movie_titles]
+def filter_movie_titles_by_valid_set(movies, valid_item_names):
+    return [movie for movie in movies if movie['title'] in valid_item_names]
 
 def sample_random(user_movies):
     validation_movie = user_movies.sample(n=1)
@@ -90,7 +69,7 @@ def sample_most_recent(user_movies):
 
 def split_and_filter_ratings(user_movies, rating_threshold=4):
     # Sort the DataFrame by the 'timestamp' column in descending order and select the first 52 movies
-    user_movies = user_movies.sort_values(by='timestamp', ascending=False)
+    user_movies = user_movies.sort_values(by='timestamp', ascending=False) 
     if user_movies.shape[0] < 52:
         #take the last two movies that are rated higher than the threshold
         validation_test_movies = user_movies[user_movies['rating'] >= rating_threshold].tail(2)
@@ -116,7 +95,7 @@ def split_and_filter_ratings(user_movies, rating_threshold=4):
         return None,None,None,None
     return prompt_movies, validation_set, test_set,training_set
 
-def generate_train_val_test_splits(ratings, k, movie_metadata):
+def generate_train_val_test_splits(ratings, k):
     # Count the number of ratings for each user
     user_counts = ratings['userId'].value_counts()
 
@@ -134,15 +113,15 @@ def generate_train_val_test_splits(ratings, k, movie_metadata):
     non_users = []
     for user_id in eligible_users:
         # Extract user's ratings
-        user_ratings = ratings[ratings['userId'] == user_id]
-        user_movies = user_ratings.merge(movie_metadata, left_on='movieId', right_on='movielens_id')
+        # user_movies = user_ratings.merge(movie_metadata, left_on='itemId', right_on='movielens_id')
+        user_movies = ratings[ratings['userId'] == user_id]
         # user_movies = user_movies.dropna(subset=['summary'])  # Remove movies with 'NaN' summary
-        user_movies = user_movies[user_movies['title'].isin(valid_movie_titles)]
-        movie_set = set(user_movies['movieId'])
+        # user_movies = user_movies[user_movies['title'].isin(valid_item_names)]
+        movie_set = set(user_movies['itemId'])
 
 
         # Randomly choose one movie for validation and remove it from user's ratings
-        prompt_movies,validation_movie, test_movie,training_set  =split_and_filter_ratings(user_movies)
+        prompt_movies,validation_movie, test_movie,training_set = split_and_filter_ratings(user_movies)
         if prompt_movies is None:
             non_users.append(user_id)
             continue
@@ -166,52 +145,71 @@ def generate_train_val_test_splits(ratings, k, movie_metadata):
     promp_set = pd.concat(prompt_set)
 
     return train_data, val_data, test_data,promp_set,non_users
+if __name__ == '__main__':
+    k = 20  # threshold for history length
 
-
-
-if __name__ == "__main__":
-        
-
-
-    valid_movie_titles = pd.read_csv(f'../data/ml-1m/movies.dat',encoding='ISO-8859-1',sep='::',header=None).iloc[:,1].tolist()
-
+    print(f"{data_name=}")
     if data_name == 'ml-1m':
+        k = 10  # threshold for history length
+
+        valid_item_names = pd.read_csv(f'../data/ml-1m/movies.dat',encoding='ISO-8859-1',sep='::',header=None).iloc[:,1].tolist()
         ratings_file = '../data/ml-1m/ratings.dat'
         separator = "::"
         header = None
-        rating_columns = ['userId', 'movieId', 'rating', 'timestamp']
+        rating_columns = ['userId', 'itemId', 'rating', 'timestamp']
         movie_metadata_file = '../data/ml-1m/movies.dat'
-    elif data_name == 'ml-100k':
-        ratings_file = '../data/ml-100k/u.data'
-        separator = "\t"
-        header = None
-        rating_columns = ['userId', 'movieId', 'rating', 'timestamp']
-        movie_metadata_file = '../data/ml-100k/u.item'
+        ratings = pd.read_csv(ratings_file, sep=separator, header=header, names=rating_columns)
+        
+        # Load movie metadata
+        movie_metadata = pd.read_csv(movie_metadata_file,encoding='ISO-8859-1',sep='::',header=None)
+        movie_metadata.columns = ['movielens_id','title','genre']
 
 
-    ratings = pd.read_csv(ratings_file, sep=separator, header=header, encoding='ISO-8859-1')
-    ratings.columns = ['userId', 'movieId', 'rating', 'timestamp']
-   
+        ratings = ratings.merge(movie_metadata, left_on='itemId', right_on='movielens_id', how = 'left')
+        # display(ratings)
+        
+        train_data, val_data, test_data,promp_set,non_users = generate_train_val_test_splits(ratings, k)
 
-    # Load movie metadata
-    movie_metadata = pd.read_csv('../data/merged_asin_movielens_summary.csv')
+    elif data_name == 'books':
+        ratings_file = '../data/books/ratings.csv'
+        ratings = pd.read_csv(ratings_file)
+        ratings.rename(columns={'book_id':'itemId','review/time':'timestamp','Title':'title','review/score':'rating','User_id':'userId','categories':'genres'}, inplace=True)
 
-    
-    k = 20  # threshold for history length
+        valid_item_names = ratings.title.unique().tolist()
+        #rename the bookId column to itemId
+        train_data, val_data, test_data,promp_set,non_users = generate_train_val_test_splits(ratings, k)
+    elif data_name == 'goodbooks':
+        ratings_file = '../data/goodbooks/ratings.csv'
+        ratings = pd.read_csv(ratings_file)
+        #remove cold start items
+        ratings = ratings[ratings['book_id'].isin(ratings['book_id'].value_counts()[ratings['book_id'].value_counts()>10].index)]
+        
+        ratings.rename(columns={'book_id':'itemId','Title':'title','user_id':'userId'}, inplace=True)
+        valid_item_names = ratings.title.unique().tolist()
+        #rename the bookId column to itemId
+        train_data, val_data, test_data,promp_set,non_users = generate_train_val_test_splits(ratings, k)
+    elif data_name == 'netflix':
+        ratings_file = '../data/netflix/ratings.csv'
+        ratings = pd.read_csv(ratings_file)
+        ratings.rename(columns={'MovieID':'itemId','Title':'title','CustomerID':'userId','Name':'title','Rating':'rating','Date':'timestamp'}, inplace=True)
+        print(f"{ratings.columns=}")
+        valid_item_names = ratings.title.unique().tolist()
+        #rename the bookId column to itemId
+        train_data, val_data, test_data,promp_set,non_users = generate_train_val_test_splits(ratings, k)
 
-    train_data, val_data, test_data,promp_set,non_users = generate_train_val_test_splits(ratings, k, movie_metadata)
+        
+    valid_item_names = list(valid_item_names)
+    display(train_data)
+    train_data = train_data[train_data['title'].isin(valid_item_names)]
 
-    valid_movie_titles = list(valid_movie_titles)
-    train_data = train_data[train_data['title'].isin(valid_movie_titles)]
 
-
-    val_data = val_data[val_data['title'].isin(valid_movie_titles)]
-    test_data = test_data[test_data['title'].isin(valid_movie_titles)]
+    val_data = val_data[val_data['title'].isin(valid_item_names)]
+    test_data = test_data[test_data['title'].isin(valid_item_names)]
 
     # Check for overlapping user-movie pairs again after filtering
-    train_user_movie_pairs = set(zip(train_data['userId'], train_data['movieId']))
-    val_user_movie_pairs = set(zip(val_data['userId'], val_data['movieId']))
-    test_user_movie_pairs = set(zip(test_data['userId'], test_data['movieId']))
+    train_user_movie_pairs = set(zip(train_data['userId'], train_data['itemId']))
+    val_user_movie_pairs = set(zip(val_data['userId'], val_data['itemId']))
+    test_user_movie_pairs = set(zip(test_data['userId'], test_data['itemId']))
 
     overlap_train_val = train_user_movie_pairs.intersection(val_user_movie_pairs)
     overlap_train_test = train_user_movie_pairs.intersection(test_user_movie_pairs)
@@ -221,17 +219,17 @@ if __name__ == "__main__":
     num_users_test = len(set(test_data['userId']))
 
 
-    
-    ### Error checking 
-    assert not overlap_train_val, f"Overlap between train and validation sets in rows:\n{train_data[train_data[['userId', 'movieId']].apply(tuple, axis=1).isin(overlap_train_val)]}"
-    assert not overlap_train_test, f"Overlap between train and test sets in rows:\n{train_data[train_data[['userId', 'movieId']].apply(tuple, axis=1).isin(overlap_train_test)]}"
-    assert not overlap_val_test, f"Overlap between validation and test sets in rows:\n{val_data[val_data[['userId', 'movieId']].apply(tuple, axis=1).isin(overlap_val_test)]}"
 
-    print("No overlap found after filtering by valid_movie_titles.")
+    ### Error checking 
+    assert not overlap_train_val, f"Overlap between train and validation sets in rows:\n{train_data[train_data[['userId', 'itemId']].apply(tuple, axis=1).isin(overlap_train_val)]}"
+    assert not overlap_train_test, f"Overlap between train and test sets in rows:\n{train_data[train_data[['userId', 'itemId']].apply(tuple, axis=1).isin(overlap_train_test)]}"
+    assert not overlap_val_test, f"Overlap between validation and test sets in rows:\n{val_data[val_data[['userId', 'itemId']].apply(tuple, axis=1).isin(overlap_val_test)]}"
+
+    print("No overlap found after filtering by valid_item_names.")
     assert num_users_test == num_users_train and num_users_test == num_users_val, f'{num_users_val=} {num_users_train=} {num_users_test=}'
     print( 'The total number of users is ', len(set(ratings['userId'])))
     print(f"All sets have the same number of users used = {num_users_train}" , f"The number of non users is {len(non_users)}")
-    
+
     #randomly remove 500 users from the training validation and test split and make a joint set of these called strong generalization set 
     random.seed(42)
     user_set = set(train_data['userId']) | set(val_data['userId']) | set(test_data['userId'])
@@ -241,20 +239,3 @@ if __name__ == "__main__":
     train_data = train_data[~train_data['userId'].isin(user_set)]
     val_data = val_data[~val_data['userId'].isin(user_set)]
     test_data = test_data[~test_data['userId'].isin(user_set)]
-
-    #save data
-    train_data.to_csv(f'../data_preprocessed/{data_name}/train_leave_one_out_{("timestamped" if args.timestamp else "")}.csv', index=False)
-    val_data.to_csv(f'../data_preprocessed/{data_name}/validation_leave_one_out_{"timestamped" if args.timestamp else ""}.csv',index=False)
-    test_data.to_csv(f'../data_preprocessed/{data_name}/test_leave_one_out_{"timestamped" if args.timestamp else ""}.csv', index=False)
-    promp_set.to_csv(f'../data_preprocessed/{data_name}/prompt_set_new{"timestamped" if args.timestamp else ""}.csv', index=False)
-    strong_generalization_set.to_csv(f'../data_preprocessed/{data_name}/strong_generalization_set_{"timestamped" if args.timestamp else ""}.csv', index=False)
-    movie_set = set(train_data['movieId']) 
-    max_movie_id = max(movie_set)
-
-
-
-    # Print a message
-    print("data saved to CSVs to data_preprocessed folder")
-
-
-

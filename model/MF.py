@@ -1,1203 +1,22 @@
 from helper.eval_metrics import Recall_at_k_batch,NDCG_binary_at_k_batch,MRR_at_k
-from torch.distributions import Normal, kl_divergence, RelaxedOneHotCategorical
 import sys 
 sys.path.append('../')
+import os
 from collections import defaultdict
-
+import pandas as pd 
 from helper.dataloader import map_id_to_genre
-
+from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import time
-#import SentenceTransformer
-from transformers.models.phi import PhiPreTrainedModel
-from transformers.modeling_outputs import SequenceClassifierOutputWithPast
-from sentence_transformers import SentenceTransformer
-from transformers.models.t5.modeling_t5 import T5PreTrainedModel, T5Model, T5ClassificationHead,T5EncoderModel
-from transformers.models.phi.modeling_phi import PhiConfig,PhiModel
-from typing import List, Optional, Tuple, Union
-from transformers.modeling_outputs import Seq2SeqSequenceClassifierOutput
-from transformers import PreTrainedModel
-from transformers import AutoConfig
-from transformers import AutoModel,BitsAndBytesConfig
-from peft import LoraConfig, TaskType, PeftModel,get_peft_model,prepare_model_for_kbit_training
-from transformers import T5Tokenizer ,AutoTokenizer
+from transformers.models.t5.modeling_t5 import T5PreTrainedModel,T5EncoderModel
+from peft import LoraConfig, TaskType,get_peft_model,prepare_model_for_kbit_training
+from transformers import T5Tokenizer 
 import ot 
-#import deepbopy
+
+from typing import List, Optional
 from copy import deepcopy
-
-
-
-def swish(x):
-    return x.mul(torch.sigmoid(x))
-
-def log_norm_pdf(x, mu, logvar):
-    return -0.5*(logvar + np.log(2 * np.pi) + (x - mu).pow(2) / logvar.exp())
-
-
-class CompositePrior(nn.Module):
-    def __init__(self, hidden_dim, latent_dim, input_dim, mixture_weights=[3/20, 3/4, 1/10]):
-        super(CompositePrior, self).__init__()
-        
-        self.mixture_weights = mixture_weights
-        
-        self.mu_prior = nn.Parameter(torch.Tensor(1, latent_dim), requires_grad=False)
-        self.mu_prior.data.fill_(0)
-        
-        self.logvar_prior = nn.Parameter(torch.Tensor(1, latent_dim), requires_grad=False)
-        self.logvar_prior.data.fill_(0)
-        
-        self.logvar_uniform_prior = nn.Parameter(torch.Tensor(1, latent_dim), requires_grad=False)
-        self.logvar_uniform_prior.data.fill_(10)
-        
-        self.encoder_old = Encoder(hidden_dim, latent_dim, input_dim)
-        self.encoder_old.requires_grad_(False)
-        
-    def forward(self, x, z):
-        post_mu, post_logvar = self.encoder_old(x, 0)
-        
-        stnd_prior = log_norm_pdf(z, self.mu_prior, self.logvar_prior)
-        post_prior = log_norm_pdf(z, post_mu, post_logvar)
-        unif_prior = log_norm_pdf(z, self.mu_prior, self.logvar_uniform_prior)
-        
-        gaussians = [stnd_prior, post_prior, unif_prior]
-        gaussians = [g.add(np.log(w)) for g, w in zip(gaussians, self.mixture_weights)]
-        
-        density_per_gaussian = torch.stack(gaussians, dim=-1)
-                
-        return torch.logsumexp(density_per_gaussian, dim=-1)
-
-    
-class Encoder(nn.Module):
-    def __init__(self, hidden_dim, latent_dim, input_dim, eps=1e-1):
-        super(Encoder, self).__init__()
-        
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.ln1 = nn.LayerNorm(hidden_dim, eps=eps)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln2 = nn.LayerNorm(hidden_dim, eps=eps)
-        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln3 = nn.LayerNorm(hidden_dim, eps=eps)
-        self.fc4 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln4 = nn.LayerNorm(hidden_dim, eps=eps)
-        self.fc5 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln5 = nn.LayerNorm(hidden_dim, eps=eps)
-        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
-        
-    def forward(self, x, dropout_rate):
-        norm = x.pow(2).sum(dim=-1).sqrt()
-        x = x / norm[:, None]
-        x = F.dropout(x, p=dropout_rate, training=self.training)
-        h1 = self.ln1(swish(self.fc1(x)))
-        h2 = self.ln2(swish(self.fc2(h1) + h1))
-        h3 = self.ln3(swish(self.fc3(h2) + h1 + h2))
-        h4 = self.ln4(swish(self.fc4(h3) + h1 + h2 + h3))
-        h5 = self.ln5(swish(self.fc5(h4) + h1 + h2 + h3 + h4))
-        return self.fc_mu(h5), self.fc_logvar(h5)
-    
-
-
-class RecVAE(nn.Module):
-    def __init__(self, p_dims,dropout,gamma):
-        super(RecVAE, self).__init__()
-        hidden_dim = p_dims[0]
-        latent_dim = p_dims[0]
-        input_dim = p_dims[-1]
-        self.dropout = dropout
-        self.gamma = gamma 
-
-        self.encoder = Encoder(hidden_dim, latent_dim, input_dim)
-        self.prior = CompositePrior(hidden_dim, latent_dim, input_dim)
-        self.decoder = nn.Linear(latent_dim, input_dim)
-        
-    def reparameterize(self, mu, logvar):
-        if self.training:
-            std = torch.exp(0.5*logvar)
-            eps = torch.randn_like(std)
-            return eps.mul(std).add_(mu)
-        else:
-            return mu
-    def encode(self,user_ratings):
-        mu, logvar = self.encoder(user_ratings, dropout_rate=self.dropout)    
-        
-        return mu,logvar
-    def decode(self,z):
-        return self.decoder(z)
-    def forward(self, user_ratings,all_ratings, beta=None, gamma=1, dropout_rate=0.5, calculate_loss=False):
-        # print(f"{user_ratings.sum()=}")
-        mu, logvar = self.encoder(user_ratings, dropout_rate=self.dropout)    
-
-
-
-        z = self.reparameterize(mu, logvar)
-
-        x_pred = self.decoder(z)
-        
-        if calculate_loss:
-            if self.gamma:
-                norm = user_ratings.sum(dim=-1)
-                kl_weight = self.gamma * norm
-            elif beta:
-                kl_weight = beta
-
-            mll = (F.log_softmax(x_pred, dim=-1) * all_ratings).sum(dim=-1).mean()
-
-            kld = (log_norm_pdf(z, mu, logvar) - self.prior(all_ratings, z)).sum(dim=-1).mul(kl_weight).mean()
-
-            negative_elbo = -(mll - kld)
-            
-            return x_pred, negative_elbo
-            
-        else:
-            return x_pred,mu,logvar,z
-    def update_prior(self):
-        self.prior.encoder_old.load_state_dict(deepcopy(self.encoder.state_dict()))
-
-
-
-        
-
-
-class T5ClassificationHead(nn.Module):
-    """Head for sentence-level classification tasks."""
-
-    def __init__(self, config):
-        super().__init__()
-        self.dense = nn.Linear(config.d_model, config.d_model,bias = False)
-        self.dropout = nn.Dropout(p=config.classifier_dropout)
-        self.out_proj = nn.Linear(config.d_model, config.num_labels,bias = False)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.dense(hidden_states)
-        hidden_states = torch.tanh(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.out_proj(hidden_states)
-        return hidden_states
-
-class FiLMLayer(nn.Module):
-    def __init__(self, input_size, output_size):
-        super(FiLMLayer, self).__init__()
-
-        self.gamma_layer = nn.Linear(int(input_size), int(output_size))
-        self.beta_layer = nn.Linear(int(input_size), int(output_size))
-
-        self.__init__weights(fan_in = input_size,fan_out = output_size)
-       
-    def forward(self, x):
-        gamma = self.gamma_layer(x)
-
-        beta = self.beta_layer(x)
-        return gamma, beta
-
-    def __init__weights(self, fan_in, fan_out):
-        std = np.sqrt(2.0 / (fan_in + fan_out))
-        self.gamma_layer.weight.data.normal_(0.0, std)
-        self.gamma_layer.bias.data.normal_(0.0, 0.001)
-        self.beta_layer.weight.data.normal_(0.0, std)
-        self.beta_layer.bias.data.normal_(0.0, 0.001)
-
-class VaeClassifier(nn.Module):
-    def __init__(self, config,p_dims,dropout):
-        super(VaeClassifier, self).__init__()
-
-        self.llm_dim = config.d_model
-        self.film_layer = FiLMLayer(config.d_model, 200 * 2)  # Adjust dimensions as needed
-        self.dropout = nn.Dropout(p=dropout)
-        self.VAE = MultiVAE(p_dims, dropout = dropout)
-
-    def forward(self, data_tensor, hidden_states):
-        # Generate gamma and beta from hidden_states
-        hidden_states = self.dropout(hidden_states)
-        gamma, beta = self.film_layer(hidden_states)
-        # print(f"{gamma.sum()=}")
-        gamma_mu = gamma[:, :200]
-        gamma_logvar = gamma[:, 200:]
-        # print(f"{gamma_logvar.sum()=}")
-        beta_mu = beta[:, :200]
-        beta_logvar = beta[:, 200:]
-        # Apply FiLM transformation to data_tensor
-
-        mu, logvar = self.VAE.encode(data_tensor)
-
-        
-
-        film_mu = gamma_mu * mu + beta_mu
-
-        film_var = gamma_logvar * logvar + beta_logvar
-        
-        # modulated_data_tensor = F.gelu(modulated_data_tensor)
-
-        z = self.VAE.reparameterize(film_mu, film_var)
-        # Decode z
-        return self.VAE.decode(z),mu,logvar
-
-
-
-class sentenceT5ClassificationVAE(T5PreTrainedModel):
-    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
-    def __init__(self,config):
-        super().__init__(config)
-        self.transformer =   T5EncoderModel(config)
-        p_dims = [200,config.num_labels]
-        # self.linear = nn.Linear(config.d_model,config.d_model//2,bias = False)
-        self.classifier = VaeClassifier(config,p_dims,dropout=config.classifier_dropout)
-
-        self.model_parallel = True
-    def forward(
-        self,
-        data_tensor: torch.LongTensor = None,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        return_dict: Optional[bool] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        output_attentions = None,
-        output_hidden_states = None,
-        return_dict_in_generate = None,
-    ) :
-        sentence_rep = self.llm_forward(input_ids=input_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, return_dict=return_dict)
-        logits,mu,logvar = self.classifier_forward(data_tensor,sentence_rep)
-        
-        
-        return logits,mu,logvar
-    
-  
-    def classifier_forward(self,data_tensor,hidden_states):
-        # hidden_states = self.linear(hidden_states)
-        # hidden_states = F.gelu(hidden_states)
-        logits = self.classifier(data_tensor,hidden_states)
-        return logits
-    def llm_forward(self,
-                input_ids: torch.LongTensor = None,
-                attention_mask: Optional[torch.Tensor] = None,
-                position_ids: Optional[torch.LongTensor] = None,
-                past_key_values: Optional[List[torch.FloatTensor]] = None,
-                inputs_embeds: Optional[torch.FloatTensor] = None,
-                labels: Optional[torch.LongTensor] = None,
-                use_cache: Optional[bool] = None,
-                output_attentions: Optional[bool] = None,
-                output_hidden_states: Optional[bool] = None,
-                return_dict: Optional[bool] = None,):
-        outputs = self.transformer(
-            input_ids,
-            attention_mask=attention_mask,
-
-            return_dict=return_dict
-        )
-        sequence_output = outputs[0]
-        eos_mask = input_ids.eq(self.config.eos_token_id).to(sequence_output.device)
-        if len(torch.unique_consecutive(eos_mask.sum(1))) > 1:
-            raise ValueError("All examples must have the same number of <eos> tokens.")
-        batch_size, _, hidden_size = sequence_output.shape
-        sentence_representation = sequence_output[eos_mask, :].view(batch_size, -1, hidden_size)[:, -1, :]
-        return sentence_representation
-    
-    def generate_recommendations(self,summary,tokenizer,data_tensor,topk,rank = 0 ):
-        tokenized_summary = tokenizer([summary],return_tensors="pt")
-
-        
-        tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
-        semtemce_rep = self.llm_forward(**tokenized_summary)
-
-        logits = self.classifier_forward(data_tensor.unsqueeze(0),semtemce_rep)[0]
-        #check shape of data_tensor 
-        if len(data_tensor.shape) == 1:
-            data_tensor = data_tensor.unsqueeze(0)
-        
-        #mask the logits of the data_tensor 
-        logits[data_tensor >= 1] = np.log(.000001)
-        
-        #returned ranked items based on topk
-
-        ranked_logts = torch.topk(logits,topk)
-
-
-        return ranked_logts.indices.flatten().tolist()
-
-
-class otVAE (T5PreTrainedModel):
-    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
-    def __init__(self,config,llm,vae,prior,epsilon):
-        super().__init__(config)
-        self.transformer =   llm
-        p_dims = [200,config.num_labels]
-        self.epsilon = epsilon
-       
-        self.vae = vae
-        # self.joint_decoder = nn.Linear(400,config.num_labels,bias = None )
-        # self.__init__weights()
-        self.model_parallel = True
-        self.prior = prior
-
-            
-    # def __init__weights(self):
-
-
-    #         fan_in = self.joint_decoder.weight.size()[1]
-    #         fan_out = self.joint_decoder.weight.size()[0]
-    #         std = np.sqrt(2.0 / (fan_in + fan_out))
-    #         self.joint_decoder.weight.data.normal_(0.0, std)
-
-            
-        
-    def forward(
-        self,
-        data_tensor: torch.LongTensor = None,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        return_dict: Optional[bool] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        output_attentions = None,
-        output_hidden_states = None,
-        return_dict_in_generate = None,
-        alpha = .5
-    ) :
-
-        vae = self.vae
-        hidden_states = self.transformer.llm_forward(input_ids=input_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, return_dict=return_dict)
-        mu,logvar = self.transformer.encode(hidden_states)
-        z_text = vae.reparameterize(mu, logvar)
-        
-        prior_mu, prior_logvar = vae.encode(data_tensor)
-        z_rec = vae.reparameterize(prior_mu, prior_logvar)
-
-        z_merged = (1-alpha)*z_text + alpha*z_rec 
-
-
-        logits_merged = vae.decode(z_merged)
-
-        logits_rec = vae.decode(z_rec)
-        logits_text = vae.decode(z_text)
-
-        
-        
-        return logits_merged,logits_rec,logits_text,mu,logvar,prior_mu,prior_logvar,z_rec,None
-    
-    
-    
-    def classifier_forward(self,data_tensor,hidden_states):
-        # hidden_states = self.linear(hidden_states)
-        # hidden_states = F.gelu(hidden_states)
-        logits = self.classifier(data_tensor,hidden_states)
-        return logits
-
-
-    def llm_forward(self,
-                input_ids: torch.LongTensor = None,
-                attention_mask: Optional[torch.Tensor] = None,
-                position_ids: Optional[torch.LongTensor] = None,
-                past_key_values: Optional[List[torch.FloatTensor]] = None,
-                inputs_embeds: Optional[torch.FloatTensor] = None,
-                labels: Optional[torch.LongTensor] = None,
-                use_cache: Optional[bool] = None,
-                output_attentions: Optional[bool] = None,
-                output_hidden_states: Optional[bool] = None,
-                return_dict: Optional[bool] = None,):
-        outputs = self.transformer(
-            input_ids,
-            attention_mask=attention_mask,
-
-            return_dict=return_dict
-        )
-        sequence_output = outputs[0]
-        eos_mask = input_ids.eq(self.config.eos_token_id).to(sequence_output.device)
-        if len(torch.unique_consecutive(eos_mask.sum(1))) > 1:
-            raise ValueError("All examples must have the same number of <eos> tokens.")
-        batch_size, _, hidden_size = sequence_output.shape
-        sentence_representation = sequence_output[eos_mask, :].view(batch_size, -1, hidden_size)[:, -1, :]
-        return sentence_representation
-    def reparameterize(self, mu, logvar):
-        if self.training:
-            std = torch.exp(0.5 * logvar)
-            eps = torch.randn_like(std)
-            return eps.mul(std).add_(mu)
-        else:
-            return mu
-    def generate_recommendations(self,summary,tokenizer,data_tensor,topk,rank = 0 ,alpha = .5):
-        if len(data_tensor.shape) == 1:
-            data_tensor = data_tensor.unsqueeze(0)
-        tokenized_summary = tokenizer([summary],return_tensors="pt")
-
-        
-        tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
-        logits = self.forward(data_tensor = data_tensor,input_ids = tokenized_summary['input_ids'],attention_mask = tokenized_summary['attention_mask'],alpha = alpha)[0]
-        #check shape of data_tensor 
-        
-        #mask the logits of the data_tensor 
-        logits[data_tensor >= 1] = np.log(.000001)
-        
-        #returned ranked items based on topk
-
-        ranked_logts = torch.topk(logits,topk)
-
-
-        return ranked_logts.indices.flatten().tolist()
-
-
-
-class GenreVae(nn.Module):
-    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
-    def __init__(self,num_genres,prior,genre_map,genres_l,epsilon,concat=False,num_movies = None):
-        super().__init__()
-        self.epsilon = epsilon
-        self.num_genres = num_genres
-        self.mlp = nn.Sequential(
-            nn.Linear( num_genres,800, bias=False),
-        )
-        self.vae = prior
-        self.genres_l = genres_l
-        self.model_parallel = True
-        self.concat = concat
-        if concat: 
-            self.concat_mlp = nn.Linear(800,400,bias = False)
-        self.__init__weights()
-        self.genre_map = genre_map 
-        self.genre_coutns = {g:0 for g in genres_l}
-        #fill in genre counts 
-        self.genre_inds = {g.replace('-',' '):i for i,g in enumerate(sorted(genres_l))}
-        for g in genre_map:
-            for g_ in genre_map[g]:
-                self.genre_coutns[g_] += 1
-        self.genre_count_vector = torch.tensor([self.genre_coutns[g] for g in genres_l]).float()
-        self.genre_columns_one_hot = defaultdict(lambda : torch.zeros(num_movies))
-
-            
-    def __init__weights(self):
-        for layer in self.mlp:
-            if isinstance(layer, nn.Linear):
-                fan_in = layer.weight.size()[1]
-                fan_out = layer.weight.size()[0]
-                std = np.sqrt(2.0 / (fan_in + fan_out))
-                layer.weight.data.normal_(0.0, std)
-        if self.concat:
-            fan_in = self.concat_mlp.weight.size()[1]
-            fan_out = self.concat_mlp.weight.size()[0]
-            std = np.sqrt(2.0 / (fan_in + fan_out))
-            self.concat_mlp.weight.data.normal_(0.0, std)
-            
-    def set_vae(self,vae):
-        self.vae = vae
-
-    
-    def make_genre_vector(self, input ): 
-
-        # Initialize the genre vector
-        genre_vector = torch.zeros(input.shape[0], self.num_genres, device=input.device)
-        
-        # Create a genre map tensor for quick look-up
-   
-        genre_map_tensor = torch.tensor([[int(g in self.genre_map[j]) for g in sorted(self.genres_l)] for j in range(input.shape[1])], device=input.device).float()
-        
-        # Use matrix multiplication to accumulate the counts
-        genre_vector += input @ genre_map_tensor
-        normalized_genre_vector = genre_vector / genre_vector.sum(dim=1).unsqueeze(1)
-
-
-
-        return normalized_genre_vector
-
-
-    def forward(
-        self,
-        data_tensor: torch.LongTensor = None,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        return_dict: Optional[bool] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        output_attentions = None,
-        output_hidden_states = None,
-        return_dict_in_generate = None,
-        alpha = .5,
-        neg = False
-    ) :
-
-
-        # print(f"{self.vae.modules_to_save['default']=}")
-        try:
-            vae = self.vae.modules_to_save['default']
-        except:
-            vae = self.vae
-        sentence_rep = self.make_genre_vector(data_tensor)
-        sentence_rep = self.mlp(sentence_rep)
-        mu,logvar = sentence_rep[:,:400],sentence_rep[:,400:]
-        z_text = self.reparameterize(mu, logvar)
-        prior_mu, prior_logvar = vae.encode(data_tensor)
-        z_rec = vae.reparameterize(prior_mu, prior_logvar)
-
-        #map z_rec onto the text 
-        if self.concat:
-            z_merged = torch.cat([z_text,z_rec],dim = 1)
-            z_merged = self.concat_mlp(z_merged) if alpha != 0 else z_text 
-        elif neg: 
-
-            z_merged =  + (z_rec -z_text)/2
-            
-        else:
-
-            z_merged = (1-alpha)*z_text + alpha*z_rec 
-
-
-        logits_merged = vae.decode(z_merged)
-        logits_rec = vae.decode(z_rec)
-        logits_text = vae.decode(z_text)
-        
-
-        
-        
-        return logits_merged,logits_rec,logits_text,mu,logvar,prior_mu,prior_logvar,z_rec,None
-    
-    
-    def classifier_forward(self,data_tensor,hidden_states,alpha = None ):
-        # hidden_states = self.linear(hidden_states)
-        # hidden_states = F.gelu(hidden_states)
-        logits = self.classifier(data_tensor,hidden_states)
-        return logits
-
-
-    def reparameterize(self, mu, logvar):
-        if self.training:
-            std = torch.exp(0.5 * logvar)
-            eps = torch.randn_like(std)
-            return eps.mul(std).add_(mu)
-        else:
-            return mu
-
-    def generate_recommendations(self,data_tensor,topk,rank = 0 ,alpha = .5,neg = False,increase = False,nothing= False,mask_genre = None):
-
-        data_tensor=data_tensor.unsqueeze(0)
-        try:
-            vae = self.vae.modules_to_save['default']
-        except:
-            vae = self.vae
-
-
-
-
-        
-        sentence_rep = self.make_genre_vector(data_tensor)
-        if mask_genre is not None:
-
-            mask_index = self.genre_inds[mask_genre]
-            mask = torch.zeros(sentence_rep.size(1), dtype=torch.bool)
-            mask[mask_index] = True
-            sentence_rep[:,~mask] = 0
-            sentence_rep[:,mask] = 1
-
-            
-            
-        #get a dict of columsn for each genre 
-
-
-        
-        
-        
-        sentence_rep = self.mlp(sentence_rep)
-        mu,logvar = sentence_rep[:,:400],sentence_rep[:,400:]
-        z_text = self.reparameterize(mu, logvar)
-        prior_mu, prior_logvar = vae.encode(data_tensor)
-        z_rec = vae.reparameterize(prior_mu, prior_logvar)
-
-        #map z_rec onto the text 
-        if self.concat:
-            z_merged = torch.cat([z_text,z_rec],dim = 1)
-            z_merged = self.concat_mlp(z_merged) if alpha != 0 else z_text 
-        elif neg: 
-
-            z_merged =  + (z_rec -z_text)/2
-            
-        else:
-
-            z_merged = (1-alpha)*z_text + alpha*z_rec 
-
-
-        logits = vae.decode(z_merged)
-
-        #check shape of data_tensor 
-        
-        #mask the logits of the data_tensor 
-        logits[data_tensor >= 1] = np.log(.000001)
-        
-        #returned ranked items based on topk
-
-        ranked_logts = torch.topk(logits,topk)
-
-
-        return ranked_logts.indices.flatten().tolist() 
-        
- 
-class GenreTEARS(nn.Module):
-    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
-    def __init__(self,num_genres,genre_map,genres_l,epsilon,dropout,concat=False,num_movies = None):
-        super().__init__()
-        self.epsilon = epsilon
-        self.num_genres = num_genres
-        self.mlp = nn.Sequential(
-            nn.Linear( num_genres,800, bias=False),
-        )
-        self.genres_l = genres_l
-        self.model_parallel = True
-        self.concat = concat
-        if concat: 
-            self.concat_mlp = nn.Linear(800,400,bias = False)
-
-        self.genre_map = genre_map 
-        self.genre_coutns = {g:0 for g in genres_l}
-        #fill in genre counts 
-        self.genre_inds = {g.replace('-',' '):i for i,g in enumerate(sorted(genres_l))}
-        for g in genre_map:
-            for g_ in genre_map[g]:
-                self.genre_coutns[g_] += 1
-        self.genre_count_vector = torch.tensor([self.genre_coutns[g] for g in genres_l]).float()
-        self.genre_columns_one_hot = defaultdict(lambda : torch.zeros(num_movies))
-
-        self.classifier = MultiVAE(q_dims = [num_genres,800,400],p_dims = [400,num_movies],dropout = dropout)
-     
-
-        # self.post_init()
-        self.model_parallel = True
-        
-    def make_genre_vector(self, input ): 
-
-        # Initialize the genre vector
-        genre_vector = torch.zeros(input.shape[0], self.num_genres, device=input.device)
-        
-        # Create a genre map tensor for quick look-up
-   
-        genre_map_tensor = torch.tensor([[int(g in self.genre_map[j]) for g in sorted(self.genres_l)] for j in range(input.shape[1])], device=input.device).float()
-        
-        # Use matrix multiplication to accumulate the counts
-        genre_vector += input @ genre_map_tensor
-        normalized_genre_vector = genre_vector / genre_vector.sum(dim=1).unsqueeze(1)
-
-
-
-        return normalized_genre_vector
-
-
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        return_dict: Optional[bool] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        labels_tr: Optional[torch.LongTensor] = None,
-        output_attentions = None,
-        output_hidden_states = None,
-        return_dict_in_generate = None,
-        data_tensor = None
-    ) :
-        
-        sentence_rep = self.make_genre_vector(data_tensor)
-
-        logits,mu,logvar = self.classifier_forward(sentence_rep)
-
-        
-        return logits,mu,logvar
-        
-    def classifier_forward(self,hidden_states):
-        logits,mu,logvar = self.classifier(hidden_states)
-        return logits,mu,logvar
-    def encode(self,data_tensor):
-
-
-        return self.classifier.original_module.encode(data_tensor)
-    def decode (self,z):
-        return self.classifier.original_module.decode(z)
-    
-    def generate_recommendations(self,data_tensor,topk,rank = 0 ,alpha = .5,neg = False,increase = False,nothing= False,mask_genre = None):
-
-        data_tensor=data_tensor.unsqueeze(0)
-      
-        sentence_rep = self.make_genre_vector(data_tensor)
-        if mask_genre is not None:
-
-            mask_index = self.genre_inds[mask_genre]
-            mask = torch.zeros(sentence_rep.size(1), dtype=torch.bool)
-            mask[mask_index] = True
-            sentence_rep[:,~mask] = 0
-            sentence_rep[:,mask] = 1
-
-        logits = self.classifier_forward(sentence_rep)[0]
-        #check shape of data_tensor 
-        if len(data_tensor.shape) == 1:
-            data_tensor = data_tensor.unsqueeze(0)
-        
-        #mask the logits of the data_tensor 
-
-        logits[data_tensor >= 1] = np.log(.000001)
-        
-        #returned ranked items based on topk
-
-        ranked_logts = torch.topk(logits,topk)
-
-
-        return ranked_logts.indices.flatten().tolist()
-           
-
-class T5Vae(T5PreTrainedModel):
-    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
-    def __init__(self,config,prior,epsilon,concat=False):
-        super().__init__(config)
-        self.transformer =   T5EncoderModel(config)
-        p_dims = [200,config.num_labels]
-        self.epsilon = epsilon
-        self.mlp = nn.Sequential(
-            nn.Linear(config.d_model, 800, bias=False),
-        )
-        self.vae = prior
-        self.model_parallel = True
-        self.concat = concat
-        if concat: 
-            self.concat_mlp = nn.Linear(800,400,bias = False)
-        self.__init__weights()
-
-            
-    def __init__weights(self):
-        for layer in self.mlp:
-            if isinstance(layer, nn.Linear):
-                fan_in = layer.weight.size()[1]
-                fan_out = layer.weight.size()[0]
-                std = np.sqrt(2.0 / (fan_in + fan_out))
-                layer.weight.data.normal_(0.0, std)
-        if self.concat:
-            fan_in = self.concat_mlp.weight.size()[1]
-            fan_out = self.concat_mlp.weight.size()[0]
-            std = np.sqrt(2.0 / (fan_in + fan_out))
-            self.concat_mlp.weight.data.normal_(0.0, std)
-            
-    def set_vae(self,vae):
-        self.vae = vae 
-    def forward(
-        self,
-        data_tensor: torch.LongTensor = None,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        return_dict: Optional[bool] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        output_attentions = None,
-        output_hidden_states = None,
-        return_dict_in_generate = None,
-        alpha = .5,
-        neg = False
-    ) :
-
-
-        # print(f"{self.vae.modules_to_save['default']=}")
-        try:
-            vae = self.vae.modules_to_save['default']
-        except:
-            vae = self.vae
-        sentence_rep = self.llm_forward(input_ids=input_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, return_dict=return_dict)
-        sentence_rep = self.mlp(sentence_rep)
-        mu,logvar = sentence_rep[:,:400],sentence_rep[:,400:]
-        z_text = self.reparameterize(mu, logvar)
-        prior_mu, prior_logvar = vae.encode(data_tensor)
-        z_rec = vae.reparameterize(prior_mu, prior_logvar)
-
-        #map z_rec onto the text 
-        if self.concat:
-            z_merged = torch.cat([z_text,z_rec],dim = 1)
-            z_merged = self.concat_mlp(z_merged) if alpha != 0 else z_text 
-        elif neg: 
-
-            z_merged =  + (z_rec -z_text)/2
-            
-        else :
-
-            z_merged = (1-alpha)*z_text + alpha*z_rec 
-
-
-        logits_merged = vae.decode(z_merged)
-        logits_rec = vae.decode(z_rec)
-        logits_text = vae.decode(z_text)
-        
-
-        
-        
-        return logits_merged,logits_rec,logits_text,mu,logvar,prior_mu,prior_logvar,z_rec,None
-    
-    
-    def classifier_forward(self,data_tensor,hidden_states,alpha = None ):
-        # hidden_states = self.linear(hidden_states)
-        # hidden_states = F.gelu(hidden_states)
-        logits = self.classifier(data_tensor,hidden_states)
-        return logits
-
-
-    def llm_forward(self,
-                input_ids: torch.LongTensor = None,
-                attention_mask: Optional[torch.Tensor] = None,
-                position_ids: Optional[torch.LongTensor] = None,
-                past_key_values: Optional[List[torch.FloatTensor]] = None,
-                inputs_embeds: Optional[torch.FloatTensor] = None,
-                labels: Optional[torch.LongTensor] = None,
-                use_cache: Optional[bool] = None,
-                output_attentions: Optional[bool] = None,
-                output_hidden_states: Optional[bool] = None,
-                return_dict: Optional[bool] = None,):
-        outputs = self.transformer(
-            input_ids,
-            attention_mask=attention_mask,
-
-            return_dict=return_dict
-        )
-        sequence_output = outputs[0]
-        eos_mask = input_ids.eq(self.config.eos_token_id).to(sequence_output.device)
-        if len(torch.unique_consecutive(eos_mask.sum(1))) > 1:
-            raise ValueError("All examples must have the same number of <eos> tokens.")
-        batch_size, _, hidden_size = sequence_output.shape
-        sentence_representation = sequence_output[eos_mask, :].view(batch_size, -1, hidden_size)[:, -1, :]
-        return sentence_representation
-    def reparameterize(self, mu, logvar):
-        if self.training:
-            std = torch.exp(0.5 * logvar)
-            eps = torch.randn_like(std)
-            return eps.mul(std).add_(mu)
-        else:
-            return mu
-
-    def generate_recommendations(self,summary,tokenizer,data_tensor,topk,rank = 0 ,alpha = .5,neg = False,return_emb = False):
-        if len(data_tensor.shape) == 1:
-            data_tensor = data_tensor.unsqueeze(0)
-        if return_emb:
-            tokenized_summary = tokenizer(summary,return_tensors="pt")
-            tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
-            
-            return self.forward(data_tensor = data_tensor,input_ids = tokenized_summary['input_ids'],attention_mask = tokenized_summary['attention_mask'],alpha = alpha,neg = neg)
-        tokenized_summary = tokenizer([summary],return_tensors="pt")
-
-        
-        tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
-        logits = self.forward(data_tensor = data_tensor,input_ids = tokenized_summary['input_ids'],attention_mask = tokenized_summary['attention_mask'],alpha = alpha,neg = neg)[0]
-        #check shape of data_tensor 
-        
-        #mask the logits of the data_tensor 
-        logits[data_tensor >= 1] = np.log(.000001)
-        
-        #returned ranked items based on topk
-
-        ranked_logts = torch.topk(logits,topk)
-
-
-        return ranked_logts.indices.flatten().tolist() 
-
-
-
-class sentenceT5ClassificationPooling(T5PreTrainedModel):
-    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
-    def __init__(self,config):
-        super().__init__(config)
-        self.transformer =   T5EncoderModel(config)
-
-        # self.linear = nn.Linear(config.d_model,config.d_model//2,bias = False)
-        p_dims = [200,config.num_labels]
-
-        self.VAE = MultiVAE(p_dims, dropout = config.classifier_dropout)
-        #make a two layer mlp that goes from config.module_dim to 200 
-
-        self.mlp = nn.Sequential(
-            nn.Linear(config.d_model, config.d_model//2,bias = False),
-            nn.Tanh(),
-            nn.Linear(config.d_model//2, 400,bias = False)
-        )
-        
-        
-        self.__init__weights()
-        self.model_parallel = True
-    def __init__weights(self):
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                fan_in, fan_out = module.weight.size()
-                std = np.sqrt(2.0 / (fan_in + fan_out))
-                module.weight.data.normal_(0, std)
-    def forward(
-        self,
-        data_tensor: torch.LongTensor = None,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        return_dict: Optional[bool] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        gamma = .5,
-        labels: Optional[torch.LongTensor] = None,
-        output_attentions = None,
-        output_hidden_states = None,
-        return_dict_in_generate = None,
-    ) :
-        sentence_rep = self.llm_forward(input_ids=input_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, return_dict=return_dict)
-        sentence_rep = self.mlp(sentence_rep)
-        sent_mu,sent_logvar = sentence_rep[:,:200],sentence_rep[:,200:]
-        
-
-
-        vae_mu,vae_logvar = self.VAE.original_module.encode(data_tensor)
-        
-
-        mu = (gamma * sent_mu) + ((1-gamma) * vae_mu)
-        
-
-
-        logvar = (gamma * sent_logvar) + ((1-gamma) * vae_logvar)
-        
-        z = self.VAE.original_module.reparameterize(mu, logvar)
-        
-        logits = self.VAE.original_module.decode(z)
-        
-        return logits,mu,logvar
-    def classifier_forward(self,data_tensor,hidden_states):
-        # hidden_states = self.linear(hidden_states)
-        # hidden_states = F.gelu(hidden_states)
-        logits = self.classifier(data_tensor,hidden_states)
-        return logits
-    def llm_forward(self,
-                input_ids: torch.LongTensor = None,
-                attention_mask: Optional[torch.Tensor] = None,
-                position_ids: Optional[torch.LongTensor] = None,
-                past_key_values: Optional[List[torch.FloatTensor]] = None,
-                inputs_embeds: Optional[torch.FloatTensor] = None,
-                labels: Optional[torch.LongTensor] = None,
-                use_cache: Optional[bool] = None,
-                output_attentions: Optional[bool] = None,
-                output_hidden_states: Optional[bool] = None,
-                return_dict: Optional[bool] = None,):
-        outputs = self.transformer(
-            input_ids,
-            attention_mask=attention_mask,
-
-            return_dict=return_dict
-        )
-        sequence_output = outputs[0]
-        eos_mask = input_ids.eq(self.config.eos_token_id).to(sequence_output.device)
-        if len(torch.unique_consecutive(eos_mask.sum(1))) > 1:
-            raise ValueError("All examples must have the same number of <eos> tokens.")
-        batch_size, _, hidden_size = sequence_output.shape
-        sentence_representation = sequence_output[eos_mask, :].view(batch_size, -1, hidden_size)[:, -1, :]
-        return sentence_representation
-    
-    def generate_recommendations(self,summary,tokenizer,data_tensor,topk,rank = 0 ,neg = False):
-        tokenized_summary = tokenizer([summary],return_tensors="pt")
-
-        
-        tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
-        semtemce_rep = self.llm_forward(**tokenized_summary)
-
-        logits = self.classifier_forward(data_tensor.unsqueeze(0),semtemce_rep)[0]
-        #check shape of data_tensor 
-        if len(data_tensor.shape) == 1:
-            data_tensor = data_tensor.unsqueeze(0)
-        
-        #mask the logits of the data_tensor 
-        logits[data_tensor >= 1] = np.log(.000001)
-        
-        #returned ranked items based on topk
-
-        ranked_logts = torch.topk(logits,topk)
-
-
-        return ranked_logts.indices.flatten().tolist()
-
-
-        
-
-
-
-class sentenceT5Classification(T5PreTrainedModel):
-    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
-    def __init__(self,config):
-        super().__init__(config)
-        self.transformer =   T5EncoderModel(config)
-        
-        self.classifier = T5ClassificationHead(config)
-        # Initialize weights and apply final processing
-        self.post_init()
-        self.model_parallel = True
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        return_dict: Optional[bool] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        labels_tr: Optional[torch.LongTensor] = None,
-        output_attentions = None,
-        output_hidden_states = None,
-        return_dict_in_generate = None,
-        data_tensor = None
-    ) :
-        sentence_rep = self.llm_forward(input_ids=input_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, return_dict=return_dict)
-        logits = self.classifier_forward(sentence_rep)
-        
-        return logits,None,None
-    def classifier_forward(self,hidden_states):
-        logits = self.classifier(hidden_states)
-        return logits
-    def llm_forward(self,
-                input_ids: torch.LongTensor = None,
-                attention_mask: Optional[torch.Tensor] = None,
-                position_ids: Optional[torch.LongTensor] = None,
-                past_key_values: Optional[List[torch.FloatTensor]] = None,
-                inputs_embeds: Optional[torch.FloatTensor] = None,
-                labels: Optional[torch.LongTensor] = None,
-                use_cache: Optional[bool] = None,
-                output_attentions: Optional[bool] = None,
-                output_hidden_states: Optional[bool] = None,
-                return_dict: Optional[bool] = None,
-                ):
-
-        
-        outputs = self.transformer(
-            input_ids,
-            attention_mask=attention_mask,
-
-            return_dict=return_dict
-        )
-        sequence_output = outputs[0]
-
-        eos_mask = input_ids.eq(self.config.eos_token_id).to(sequence_output.device)
-
-        if len(torch.unique_consecutive(eos_mask.sum(1))) > 1:
-            raise ValueError("All examples must have the same number of <eos> tokens.")
-        batch_size, _, hidden_size = sequence_output.shape
-        sentence_representation = sequence_output[eos_mask, :].view(batch_size, -1, hidden_size)[:, -1, :]
-        return sentence_representation
-    def generate_recommendations(self,summary,tokenizer,data_tensor,topk,rank = 0 ,**kwargs):
-        tokenized_summary = tokenizer([summary],return_tensors="pt")
-
-        
-        tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
-        semtemce_rep = self.llm_forward(**tokenized_summary)
-
-        logits = self.classifier_forward(semtemce_rep)
-        #check shape of data_tensor 
-        if len(data_tensor.shape) == 1:
-            data_tensor = data_tensor.unsqueeze(0)
-        
-        #mask the logits of the data_tensor 
-
-        logits[data_tensor >= 1] = np.log(.000001)
-        
-        #returned ranked items based on topk
-
-        ranked_logts = torch.topk(logits,topk)
-
-
-        return ranked_logts.indices.flatten().tolist()
-        
-
-class sentenceT5Vae(T5PreTrainedModel):
-    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
-    def __init__(self,config):
-        super().__init__(config)
-        self.transformer =   T5EncoderModel(config)
-
-        self.classifier = MultiVAE(q_dims = [config.d_model,800,400],p_dims = [400,config.num_labels],dropout = config.classifier_dropout)
-     
-
-        # self.post_init()
-        self.model_parallel = True
-        
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        return_dict: Optional[bool] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        labels_tr: Optional[torch.LongTensor] = None,
-        output_attentions = None,
-        output_hidden_states = None,
-        return_dict_in_generate = None,
-        data_tensor = None
-    ) :
-        
-        sentence_rep = self.llm_forward(input_ids=input_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, return_dict=return_dict)
-
-        logits,mu,logvar = self.classifier_forward(sentence_rep)
-
-        
-        return logits,mu,logvar
-        
-    def classifier_forward(self,hidden_states):
-        logits,mu,logvar = self.classifier(hidden_states)
-        return logits,mu,logvar
-    def encode(self,data_tensor):
-
-
-        return self.classifier.original_module.encode(data_tensor)
-    def decode (self,z):
-        return self.classifier.original_module.decode(z)
-    def llm_forward(self,
-                input_ids: torch.LongTensor = None,
-                attention_mask: Optional[torch.Tensor] = None,
-                position_ids: Optional[torch.LongTensor] = None,
-                past_key_values: Optional[List[torch.FloatTensor]] = None,
-                inputs_embeds: Optional[torch.FloatTensor] = None,
-                labels: Optional[torch.LongTensor] = None,
-                use_cache: Optional[bool] = None,
-                output_attentions: Optional[bool] = None,
-                output_hidden_states: Optional[bool] = None,
-                return_dict: Optional[bool] = None,):
-
-        
-        outputs = self.transformer(
-            input_ids,
-            attention_mask=attention_mask,
-
-            return_dict=return_dict
-        )
-        sequence_output = outputs[0]
-        
-
-        eos_mask = input_ids.eq(self.config.eos_token_id).to(sequence_output.device)
-
-        if len(torch.unique_consecutive(eos_mask.sum(1))) > 1:
-            raise ValueError("All examples must have the same number of <eos> tokens.")
-        batch_size, _, hidden_size = sequence_output.shape
-        sentence_representation = sequence_output[eos_mask, :].view(batch_size, -1, hidden_size)[:, -1, :]
-        return sentence_representation
-    
-    
-    def generate_recommendations(self,summary,tokenizer,data_tensor,topk,rank = 0 ,alpha = None ,**kwargs):
-        tokenized_summary = tokenizer([summary],return_tensors="pt")
-
-        
-        tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
-        semtemce_rep = self.llm_forward(**tokenized_summary)
-
-        logits = self.classifier_forward(semtemce_rep)[0]
-        #check shape of data_tensor 
-        if len(data_tensor.shape) == 1:
-            data_tensor = data_tensor.unsqueeze(0)
-        
-        #mask the logits of the data_tensor 
-
-        logits[data_tensor >= 1] = np.log(.000001)
-        
-        #returned ranked items based on topk
-
-        ranked_logts = torch.topk(logits,topk)
-
-
-        return ranked_logts.indices.flatten().tolist()
-        
-    
-   
-   
 
 
 
@@ -1282,7 +101,7 @@ class MultiVAE(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.init_weights()
     
-    def forward(self, data_tensor,**kwargs):
+    def forward(self, data_tensor,lables=None,**kwargs):
         mu, logvar = self.encode(data_tensor)
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
@@ -1444,8 +263,6 @@ class MacridVAE(nn.Module):
             x_list = []
             for k in range(self.num_prototypes):
                 cates_k = cates[:, :, k]  # [B/1, n_items]
-                # print(f"{cates_k=}")
-                # encoder
                 x_k = input_rating * cates_k  # [batch_size, num_items]
                 x_k = F.normalize(x_k, p=2, dim=1)  # [batch_size, num_items]
                 x_k = self.dropout_layer(x_k)  # [batch_size, num_items]
@@ -1463,7 +280,7 @@ class MacridVAE(nn.Module):
                     logvar_list.append(logvar)
 
                     z = self.reparameterize(mu, logvar)
-                    # print(f"{z.shape=}")
+
                     z = F.normalize(z, dim=1)
                     z_list.append(z)
 
@@ -1509,7 +326,7 @@ class MacridVAE(nn.Module):
             'logvar_list': enc_outputs['logvar_list']
         }
 
-    def forward(self, input_rating,labels, need_prob_k=False, need_z=False,anneal = 0):
+    def forward(self, input_rating,labels, need_prob_k=False, need_z=False,anneal = 0, **kwargs):
         enc_outputs = self.encode(input_rating)
         dec_outputs = self.decode(enc_outputs, need_prob_k=need_prob_k)
         logits = dec_outputs['logits']
@@ -1589,328 +406,133 @@ class MacridVAE(nn.Module):
         return self.parameters()
 
 
-class MacridTEARS(T5PreTrainedModel):
-    def __init__(self,
-                config,epsilon,
-                args
-                ):
-        super().__init__(config)
+def swish(x):
+    return x.mul(torch.sigmoid(x))
 
-        self.transformer =   T5EncoderModel(config)
-        p_dims = [200,config.num_labels]
-        self.epsilon = epsilon
-        self.mlp = nn.Sequential(
-            nn.Linear(config.d_model, 800, bias=False),
-        )
-        self.vae = None
-        self.model_parallel = True
-        self.args = args
-        self.__init__weights()
-
-    def set_vae(self,vae):
-        self.vae = vae
-    def __init__weights(self):
-        for layer in self.mlp:
-            if isinstance(layer, nn.Linear):
-                fan_in = layer.weight.size()[1]
-                fan_out = layer.weight.size()[0]
-                std = np.sqrt(2.0 / (fan_in + fan_out))
-                layer.weight.data.normal_(0.0, std)
-
-    def forward(
-        self,
-        data_tensor: torch.LongTensor = None,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        return_dict: Optional[bool] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        output_attentions = None,
-        output_hidden_states = None,
-        return_dict_in_generate = None,
-        alpha = .5,
-        neg = False
-    ) :
+def log_norm_pdf(x, mu, logvar):
+    return -0.5*(logvar + np.log(2 * np.pi) + (x - mu).pow(2) / logvar.exp())
 
 
-        # print(f"{self.vae.modules_to_save['default']=}")
-        kfac = self.args.kfac
-        split = 400//kfac
-        try:
-            vae = self.vae.modules_to_save['default']
-        except:
-            vae = self.vae
-        sentence_rep = self.llm_forward(input_ids=input_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, return_dict=return_dict)
-        sentence_rep = self.mlp(sentence_rep)
-        mu,logvar = sentence_rep[:,:400],sentence_rep[:,400:]
-        #normalize across factors then reshape it back 
-
-        # mu = F.normalize(mu.view(-1,kfac,split),dim=-1).view(-1,400)
-
-
+class CompositePrior(nn.Module):
+    def __init__(self, hidden_dim, latent_dim, input_dim, mixture_weights=[3/20, 3/4, 1/10]):
+        super(CompositePrior, self).__init__()
         
-        z_text = self.reparameterize(mu, logvar)
-        z_text = F.normalize(z_text.view(-1,kfac,split),dim=-1).view(-1,400)
-        outputs = vae.encode(data_tensor)
-        z_rec = outputs['z_list']
-        z_rec = torch.cat(z_rec,dim =1 )
+        self.mixture_weights = mixture_weights
+        
+        self.mu_prior = nn.Parameter(torch.Tensor(1, latent_dim), requires_grad=False)
+        self.mu_prior.data.fill_(0)
+        
+        self.logvar_prior = nn.Parameter(torch.Tensor(1, latent_dim), requires_grad=False)
+        self.logvar_prior.data.fill_(0)
+        
+        self.logvar_uniform_prior = nn.Parameter(torch.Tensor(1, latent_dim), requires_grad=False)
+        self.logvar_uniform_prior.data.fill_(10)
+        
+        self.encoder_old = Encoder(hidden_dim, latent_dim, input_dim)
+        self.encoder_old.requires_grad_(False)
+        
+    def forward(self, x, z):
+        post_mu, post_logvar = self.encoder_old(x, 0)
+        
+        stnd_prior = log_norm_pdf(z, self.mu_prior, self.logvar_prior)
+        post_prior = log_norm_pdf(z, post_mu, post_logvar)
+        unif_prior = log_norm_pdf(z, self.mu_prior, self.logvar_uniform_prior)
+        
+        gaussians = [stnd_prior, post_prior, unif_prior]
+        gaussians = [g.add(np.log(w)) for g, w in zip(gaussians, self.mixture_weights)]
+        
+        density_per_gaussian = torch.stack(gaussians, dim=-1)
+                
+        return torch.logsumexp(density_per_gaussian, dim=-1)
 
-
-        prior_mu = torch.cat(outputs['mu_list'],dim=1)
-
-        prior_logvar = torch.cat(outputs['logvar_list'],dim=1)
     
-        z_text = z_text.view(-1,kfac,split)
-        z_text = z_text.view(-1,400)
-       
-        if neg: 
-
-            z_merged =  + (z_rec -z_text)/2
-            
-        else:
-
-            z_merged = (1-alpha)*z_text + alpha*z_rec 
-          
-        z_text = z_text.view(-1,kfac,split)
-        z_rec = z_rec.view(-1,kfac,split)
-        z_merged = F.normalize(z_merged.view(-1,kfac,split),dim=-1)
-
-
+class Encoder(nn.Module):
+    def __init__(self, hidden_dim, latent_dim, input_dim, eps=1e-1):
+        super(Encoder, self).__init__()
         
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.ln1 = nn.LayerNorm(hidden_dim, eps=eps)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2 = nn.LayerNorm(hidden_dim, eps=eps)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln3 = nn.LayerNorm(hidden_dim, eps=eps)
+        self.fc4 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln4 = nn.LayerNorm(hidden_dim, eps=eps)
+        self.fc5 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln5 = nn.LayerNorm(hidden_dim, eps=eps)
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
         
-        logits_merged = vae.decode(outputs, z_list = z_merged)['logits']
-        logits_rec = vae.decode(outputs,z_list = z_rec)['logits']
-        logits_text = vae.decode(outputs,z_list = z_text)['logits']
-        
-
-        
-        
-
-        return logits_merged,logits_rec,logits_text,mu,logvar,prior_mu,prior_logvar,z_rec,None
+    def forward(self, x, dropout_rate):
+        norm = x.pow(2).sum(dim=-1).sqrt()
+        x = x / norm[:, None]
+        x = F.dropout(x, p=dropout_rate, training=self.training)
+        h1 = self.ln1(swish(self.fc1(x)))
+        h2 = self.ln2(swish(self.fc2(h1) + h1))
+        h3 = self.ln3(swish(self.fc3(h2) + h1 + h2))
+        h4 = self.ln4(swish(self.fc4(h3) + h1 + h2 + h3))
+        h5 = self.ln5(swish(self.fc5(h4) + h1 + h2 + h3 + h4))
+        return self.fc_mu(h5), self.fc_logvar(h5)
     
-    
-    def classifier_forward(self,data_tensor,hidden_states,alpha = None ):
-        # hidden_states = self.linear(hidden_states)
-        # hidden_states = F.gelu(hidden_states)
-        logits = self.classifier(data_tensor,hidden_states)
-        return logits
 
 
-    def llm_forward(self,
-                input_ids: torch.LongTensor = None,
-                attention_mask: Optional[torch.Tensor] = None,
-                position_ids: Optional[torch.LongTensor] = None,
-                past_key_values: Optional[List[torch.FloatTensor]] = None,
-                inputs_embeds: Optional[torch.FloatTensor] = None,
-                labels: Optional[torch.LongTensor] = None,
-                use_cache: Optional[bool] = None,
-                output_attentions: Optional[bool] = None,
-                output_hidden_states: Optional[bool] = None,
-                return_dict: Optional[bool] = None,):
-        outputs = self.transformer(
-            input_ids,
-            attention_mask=attention_mask,
+class RecVAE(nn.Module):
+    def __init__(self, p_dims,dropout,gamma):
+        super(RecVAE, self).__init__()
+        hidden_dim = p_dims[0]
+        latent_dim = p_dims[0]
+        input_dim = p_dims[-1]
+        self.dropout = dropout
+        self.gamma = gamma 
 
-            return_dict=return_dict
-        )
-        sequence_output = outputs[0]
-        eos_mask = input_ids.eq(self.config.eos_token_id).to(sequence_output.device)
-        if len(torch.unique_consecutive(eos_mask.sum(1))) > 1:
-            raise ValueError("All examples must have the same number of <eos> tokens.")
-        batch_size, _, hidden_size = sequence_output.shape
-        sentence_representation = sequence_output[eos_mask, :].view(batch_size, -1, hidden_size)[:, -1, :]
-        return sentence_representation
+        self.encoder = Encoder(hidden_dim, latent_dim, input_dim)
+        self.prior = CompositePrior(hidden_dim, latent_dim, input_dim)
+        self.decoder = nn.Linear(latent_dim, input_dim)
+        
     def reparameterize(self, mu, logvar):
         if self.training:
-            std = torch.exp(0.5 * logvar)
+            std = torch.exp(0.5*logvar)
             eps = torch.randn_like(std)
             return eps.mul(std).add_(mu)
         else:
             return mu
-
-    def generate_recommendations(self,summary,tokenizer,data_tensor,topk,rank = 0 ,alpha = .5,neg = False):
-        if len(data_tensor.shape) == 1:
-            data_tensor = data_tensor.unsqueeze(0)
-        tokenized_summary = tokenizer([summary],return_tensors="pt")
-
+    def encode(self,user_ratings):
+        mu, logvar = self.encoder(user_ratings, dropout_rate=self.dropout)    
         
-        tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
-        logits = self.forward(data_tensor = data_tensor,input_ids = tokenized_summary['input_ids'],attention_mask = tokenized_summary['attention_mask'],alpha = alpha,neg = neg)[0]
-        #check shape of data_tensor 
+        return mu,logvar
+    def decode(self,z):
+        return self.decoder(z)
+    def forward(self, user_ratings,all_ratings, beta=None, gamma=1, dropout_rate=0.5, calculate_loss=False):
+
+        mu, logvar = self.encoder(user_ratings, dropout_rate=self.dropout)    
+        z = self.reparameterize(mu, logvar)
+
+        x_pred = self.decoder(z)
         
-        #mask the logits of the data_tensor 
-        logits[data_tensor >= 1] = np.log(.000001)
-        
-        #returned ranked items based on topk
+        if calculate_loss:
+            if self.gamma:
+                norm = user_ratings.sum(dim=-1)
+                kl_weight = self.gamma * norm
+            elif beta:
+                kl_weight = beta
 
-        ranked_logts = torch.topk(logits,topk)
+            mll = (F.log_softmax(x_pred, dim=-1) * all_ratings).sum(dim=-1).mean()
 
+            kld = (log_norm_pdf(z, mu, logvar) - self.prior(all_ratings, z)).sum(dim=-1).mul(kl_weight).mean()
 
-        return ranked_logts.indices.flatten().tolist()
-
-
-class classifierHead(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size,bias = False)
-        self.dropout = nn.Dropout(p=config.dropout)
-        self.out_proj = nn.Linear(config.hidden_size, config.num_labels,bias = False)
-        self.init_weights()
-
-    def init_weights(self):
-        nn.init.xavier_uniform_(self.dense.weight)
-        nn.init.constant_(self.dense.bias, 0)
-        nn.init.xavier_uniform_(self.out_proj.weight)
-        nn.init.constant_(self.out_proj.bias, 0)
-   
-
-                
-                
-    def forward(self, hidden_states):
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.dense(hidden_states)
-        hidden_states = torch.tanh(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.out_proj(hidden_states)
-        return hidden_states
-
-
-
-class Classifier(nn.Module):
-    def __init__(self,num_labels,hidden_size,dropout):
-        super(Classifier,self).__init__()
-        self.dense = nn.Linear(hidden_size, hidden_size,bias = False)
-        self.dropout = nn.Dropout(p=dropout)
-        self.out_proj = nn.Linear(hidden_size, num_labels,bias = False)
-        self.init_weights()
-    def init_weights(self):
-        nn.init.xavier_uniform_(self.dense.weight)
-        nn.init.xavier_uniform_(self.out_proj.weight)
-    def forward(self, hidden_states):
-
-        # hidden_states = torch.tanh(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.dense(hidden_states)
-        hidden_states = torch.tanh(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.out_proj(hidden_states)
-        return hidden_states
-        
-    
-
-class MistralClassifier(nn.Module):
-    def __init__(self,mistral,num_labels,dropout,config,pooling_mode,tokenizer
+            negative_elbo = -(mll - kld)
             
-):
-        super(MistralClassifier,self).__init__()
-        self.config = config
-        self.mistral = mistral
-        self.dropout = nn.Dropout(dropout)
-        self.pooling_mode = pooling_mode
-        self.tokenizer = tokenizer
-        self.classifier = Classifier(num_labels,4096,dropout).bfloat16()
-    def forward(self,
-                input_ids: torch.LongTensor = None,
-                attention_mask: Optional[torch.Tensor] = None,
-                position_ids: Optional[torch.LongTensor] = None,
-                past_key_values: Optional[List[torch.FloatTensor]] = None,
-                inputs_embeds: Optional[torch.FloatTensor] = None,
-                labels: Optional[torch.LongTensor] = None,
-                use_cache: Optional[bool] = None,
-                output_attentions: Optional[bool] = None,
-                labels_tr: Optional[torch.LongTensor] = None,
-                output_hidden_states: Optional[bool] = None,
-                return_dict: Optional[bool] = None,):
-  
-
-        hidden_states = self.llm_forward(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, labels=labels, use_cache=use_cache, output_attentions=output_attentions, output_hidden_states=output_hidden_states, return_dict=return_dict)
-        
-        logits = self.classifier_forward(hidden_states)
-
-
-        return [logits]
-    def classifier_forward(self,hidden_states):
-        hidden_states = self.dropout(hidden_states)
-        logits = self.classifier(hidden_states)
-        return logits
-    def llm_forward(self,
-                input_ids: torch.LongTensor = None,
-                attention_mask: Optional[torch.Tensor] = None,
-                position_ids: Optional[torch.LongTensor] = None,
-                past_key_values: Optional[List[torch.FloatTensor]] = None,
-                inputs_embeds: Optional[torch.FloatTensor] = None,
-                labels: Optional[torch.LongTensor] = None,
-                use_cache: Optional[bool] = None,
-                output_attentions: Optional[bool] = None,
-                output_hidden_states: Optional[bool] = None,
-                return_dict: Optional[bool] = None,):
-        hidden_states = self.mistral(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
-        features = {"input_ids": input_ids, "attention_mask": attention_mask}
-        hidden_states = self.get_pooling(features,hidden_states)
-        return hidden_states
-    def generate_recommendations(self,summary,tokenizer,data_tensor,topk,rank = 0 ):
-        tokenized_summary = tokenizer([summary],return_tensors="pt")
-
-        
-        tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
-        semtemce_rep = self.llm_forward(**tokenized_summary)
-
-        logits = self.classifier_forward(semtemce_rep)
-        #check shape of data_tensor 
-        if len(data_tensor.shape) == 1:
-            data_tensor = data_tensor.unsqueeze(0)
-        
-        #mask the logits of the data_tensor 
-        logits[data_tensor >= 1] = np.log(.000001)
-        
-        #returned ranked items based on topk
-
-        ranked_logts = torch.topk(logits,topk)
-
-
-        return ranked_logts.indices.flatten().tolist()
-
-
-    def get_pooling(self, features, last_hidden_states):  # All models padded from left
-        assert self.tokenizer.padding_side == 'left', "Pooling modes are implemented for padding from left."
-
-        seq_lengths = features["attention_mask"].sum(dim=-1)
-        if self.pooling_mode == "mean":
-            return torch.stack([last_hidden_states[i, -length:, :].mean(dim=0) for i, length in enumerate(seq_lengths)], dim=0) 
-        elif self.pooling_mode == "weighted_mean":
-            bs, l, _ = last_hidden_states.shape
-            complete_weights = torch.zeros(bs, l, device=last_hidden_states.device)
-            for i, seq_l in enumerate(seq_lengths):
-                if seq_l > 0:
-                    complete_weights[i, -seq_l:] = torch.arange(seq_l) + 1
-                    complete_weights[i] /= torch.clamp(complete_weights[i].sum(), min=1e-9)
-            return torch.sum(last_hidden_states * complete_weights.unsqueeze(-1), dim=1)
-        elif self.pooling_mode == "eos_token" or self.pooling_mode == "last_token":
-            return last_hidden_states[:, -1]
-        elif self.pooling_mode == "bos_token":
-            return last_hidden_states[features["input_ids"]==self.tokenizer.bos_token_id]
+            return x_pred, negative_elbo
+            
         else:
-            raise ValueError(f"{self.pooling_mode} is not implemented yet.")
-        
-
-def loss_function(recon_x, x, mu, logvar, anneal=1.0):
-    # BCE_fun = F.binary_cross_entropy(recon_x.float(), x.float())
-    # print(f"{BCE_fun=}")
-    if logvar is not None:
-        BCE = -torch.mean(torch.mean(F.log_softmax(recon_x, 1) * x, -1))
-
-        KLD = -0.5 * torch.mean(torch.mean(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
-    else:
-        BCE = -torch.mean(torch.mean(F.log_softmax(recon_x, 1) * x, -1))
-        KLD = torch.zeros_like(BCE)
+            return x_pred,mu,logvar,z
+    def update_prior(self):
+        self.prior.encoder_old.load_state_dict(deepcopy(self.encoder.state_dict()))
 
 
-    return BCE + anneal * KLD,BCE 
-
-
-class EASY(nn.Module):
+class EASE(nn.Module):
     def __init__(self, num_items, l2_reg=5000):
-        super(EASY, self).__init__()
+        super(EASE, self).__init__()
         self.num_items = num_items
         self.l2_reg = l2_reg
         self.B = None
@@ -1956,52 +578,524 @@ class EASY(nn.Module):
 
 
         return metrics
+    @staticmethod
+    def train(args,train_dataloader,val_dataloader,test_dataloader,num_movies):
+        train_items = []
+        target_items = []
+        for b in train_dataloader: 
+            train_items.append(b['labels_tr'])
+            target_items.append(b['labels'])
+        train_items = torch.concat(train_items)
+        target_items = torch.concat(target_items)
+        
+        val_items = []
+        val_target_items = []
+        for b in val_dataloader: 
+            val_items.append(b['labels_tr'])
+            val_target_items.append(b['labels'])
+        val_target_items = torch.concat(val_target_items)
+        val_items = torch.concat(val_items)
+        
+        test_items = []
+        test_target_items = []
+        for b in test_dataloader: 
+            test_items.append(b['labels_tr'])
+            test_target_items.append(b['labels'])
+        test_target_items = torch.concat(test_target_items)
+        test_items = torch.concat(test_items)
+        train_matrix = 0
+        l2_regs = np.linspace(1,10000,50)
+        for l2_reg in (pbar:=tqdm(l2_regs[1:2])):
+            model = get_EASE(args,num_movies,l2_reg)
+            model(target_items)
+            metrics = model.eval(val_items,val_target_items)
+            recall = metrics['ndcg@50']
+            pbar.set_description(f"Recall@50 = {recall}, l2_reg = {l2_reg}")
+            if recall > train_matrix:
+                train_matrix = recall
+                best_l2_reg = l2_reg
+        
+        model = get_EASE(args,num_movies,best_l2_reg)
+        metrics = model.eval(test_items,test_target_items)
+        #logging
+        csv_path = f"./model_logs/{args.data_name}/{args.embedding_module}/parameter_sweep.csv"
+        log_results = pd.DataFrame({'model_name': 'EASE',**metrics}).round(4)
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        log_results.to_csv(csv_path)
+        print(f'Saved to {csv_path}')
+
+
+
+
+class Tears(T5PreTrainedModel):
+    def __init__(self,config):
+        super().__init__(config)
+        self.transformer =   T5EncoderModel(config)
+
+class TearsBase(T5PreTrainedModel):
+    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
+    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
+    def __init__(self,config):
+        super().__init__(config)
+        self.transformer =   T5EncoderModel(config)
+        self.classifier = MultiVAE(q_dims = [config.d_model,800,400],p_dims = [400,config.num_labels],dropout = config.classifier_dropout)
+        self.model_parallel = True
+    
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        return_dict: Optional[bool] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        **kwargs
+    ) :
+        sentence_rep = self.llm_forward(input_ids=input_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, return_dict=return_dict)
+        logits,mu,logvar = self.classifier(sentence_rep)
+        return logits,mu,logvar
+
+    def llm_forward(self,
+                input_ids: torch.LongTensor = None,
+                attention_mask: Optional[torch.Tensor] = None,
+                return_dict: Optional[bool] = None,
+                **kwargs):
+
+        outputs = self.transformer(
+            input_ids,
+            attention_mask=attention_mask,
+
+            return_dict=return_dict
+        )
+        sequence_output = outputs[0]
+        eos_mask = input_ids.eq(self.config.eos_token_id).to(sequence_output.device)
+
+        if len(torch.unique_consecutive(eos_mask.sum(1))) > 1:
+            raise ValueError("All examples must have the same number of <eos> tokens.")
+        batch_size, _, hidden_size = sequence_output.shape
+        sentence_representation = sequence_output[eos_mask, :].view(batch_size, -1, hidden_size)[:, -1, :]
+        return sentence_representation
+    
+    
+    def generate_recommendations(self,summary,tokenizer,data_tensor,topk,rank = 0 ,alpha = None ,**kwargs):
+        tokenized_summary = tokenizer([summary],return_tensors="pt")
+        tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
+        semtemce_rep = self.llm_forward(**tokenized_summary)
+        logits = self.classifier(semtemce_rep)[0]
+        if len(data_tensor.shape) == 1:
+            data_tensor = data_tensor.unsqueeze(0)
+        
+        #mask the logits of the data_tensor 
+
+        logits[data_tensor >= 1] = np.log(.000001)
+        
+        #returned ranked items based on topk
+
+        ranked_logts = torch.topk(logits,topk)
+
+
+        return ranked_logts.indices.flatten().tolist()
+
+
+
+
+# TEARS VAE
+class TearsVAE(T5PreTrainedModel):
+    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
+    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
+    def __init__(self,config,epsilon,args):
+        super().__init__(config)
+        self.transformer =   T5EncoderModel(config)
+        self.epsilon = epsilon
+        self.mlp = nn.Sequential(
+            nn.Linear(config.d_model, 800, bias=False),
+        )
+        self.model_parallel = True
+        self.args = args
+        self.__init__weights()
+
+    def __init__weights(self):
+        for layer in self.mlp:
+            if isinstance(layer, nn.Linear):
+                fan_in = layer.weight.size()[1]
+                fan_out = layer.weight.size()[0]
+                std = np.sqrt(2.0 / (fan_in + fan_out))
+                layer.weight.data.normal_(0.0, std)
+    
+    def set_vae(self,vae):
+        self.vae = vae
+    def classifier_forward(self,data_tensor,hidden_states,alpha = None ):
+        logits = self.classifier(data_tensor,hidden_states)
+        return logits
+
+    def llm_forward(self,
+                input_ids: torch.LongTensor = None,
+                attention_mask: Optional[torch.Tensor] = None,
+                return_dict: Optional[bool] = None,**kwargs):
+        outputs = self.transformer(
+            input_ids,
+            attention_mask=attention_mask,
+
+            return_dict=return_dict
+        )
+        sequence_output = outputs[0]
+        eos_mask = input_ids.eq(self.config.eos_token_id).to(sequence_output.device)
+        if len(torch.unique_consecutive(eos_mask.sum(1))) > 1:
+            raise ValueError("All examples must have the same number of <eos> tokens.")
+        batch_size, _, hidden_size = sequence_output.shape
+        sentence_representation = sequence_output[eos_mask, :].view(batch_size, -1, hidden_size)[:, -1, :]
+        return sentence_representation
+    
+
+    def forward(
+        self,
+        data_tensor: torch.LongTensor = None,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        return_dict: Optional[bool] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        alpha = .5,
+        neg = False,
+        **kdwargs
+    ) :
+
+        sentence_rep = self.llm_forward(input_ids=input_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, return_dict=return_dict)
+        sentence_rep = self.mlp(sentence_rep)
+        mu,logvar = sentence_rep[:,:400],sentence_rep[:,400:]
+        z_text = self.vae.reparameterize(mu, logvar)
+        rec_mu, rec_logvar = self.vae.encode(data_tensor)
+        z_rec = self.vae.reparameterize(rec_mu, rec_logvar)
+
+
+        if neg: 
+
+            z_merged =  + (z_rec -z_text)/2
+            
+        else :
+
+            z_merged = (1-alpha)*z_text + alpha*z_rec 
+
+        logits_merged = self.vae.decode(z_merged)
+        logits_rec = self.vae.decode(z_rec)
+        logits_text = self.vae.decode(z_text)
+        return logits_merged,logits_rec,logits_text,mu,logvar,rec_mu,rec_mu
+
+    def generate_recommendations(self,summary,tokenizer,data_tensor,topk,rank = 0 ,alpha = .5,neg = False,return_emb = False):
+        if len(data_tensor.shape) == 1:
+            data_tensor = data_tensor.unsqueeze(0)
+        if return_emb:
+            tokenized_summary = tokenizer(summary,return_tensors="pt")
+            tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
+            
+            return self.forward(data_tensor = data_tensor,input_ids = tokenized_summary['input_ids'],attention_mask = tokenized_summary['attention_mask'],alpha = alpha,neg = neg)
+        tokenized_summary = tokenizer([summary],return_tensors="pt")
+
+        
+        tokenized_summary = {k: v.to(rank) for k, v in tokenized_summary.items()}
+        logits = self.forward(data_tensor = data_tensor,input_ids = tokenized_summary['input_ids'],attention_mask = tokenized_summary['attention_mask'],alpha = alpha,neg = neg)[0]
+        #check shape of data_tensor 
+        
+        #mask the logits of the data_tensor 
+        logits[data_tensor >= 1] = np.log(.000001)
+        
+        #returned ranked items based on topk
+        ranked_logts = torch.topk(logits,topk)
+
+
+        return ranked_logts.indices.flatten().tolist() 
+
+
+
+
+class MacridTEARS(TearsVAE):
+    def __init__(self,
+                config,epsilon,
+                args
+                ):
+        super().__init__(config,epsilon,args)
+    
+    #overwrite forwrard function to align with MacrivVAE specific configurations
+    def forward(
+        self,
+        data_tensor: torch.LongTensor = None,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        return_dict: Optional[bool] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        alpha = .5,
+        neg = False,
+        **kwargs
+    ) :
+
+        #have to split the dimensions to be compatible with MacridVAE factors
+        kfac = self.args.kfac
+        split = self.args.emb_dim//kfac
+        
+        #get sentence representation
+        sentence_rep = self.llm_forward(input_ids=input_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, return_dict=return_dict)
+        sentence_rep = self.mlp(sentence_rep)
+        mu,logvar = sentence_rep[:,:self.args.emb_dim],sentence_rep[:,self.args.emb_dim:]
+
+        
+        #[B,emb_dim]
+        z_text = self.vae.reparameterize(mu, logvar)
+        outputs = self.vae.encode(data_tensor)
+    
+        #MacridVAE's output is normalized across factors so we normalize as well
+        z_text = F.normalize(z_text.view(-1,kfac,split),dim=-1).view(-1,self.args.emb_dim)
+        z_rec = outputs['z_list']
+        z_rec = torch.cat(z_rec,dim =1 )
+        
+        #get back into shape [B,emb_dim] for pooling
+        rec_mu = torch.cat(outputs['mu_list'],dim=1)
+        rec_logvar = torch.cat(outputs['logvar_list'],dim=1)
+
+        #pooling       
+        if neg: 
+            z_merged =  + (z_rec -z_text)/2
+
+        else:
+            z_merged = (1-alpha)*z_text + alpha*z_rec 
+          
+        #reshape to [B,kfac,split]
+        z_text = z_text.view(-1,kfac,split)
+        z_rec = z_rec.view(-1,kfac,split)
+        z_merged = F.normalize(z_merged.view(-1,kfac,split),dim=-1)
+
+
+        
+        #use shared decoder
+        logits_merged = self.vae.decode(outputs, z_list = z_merged)['logits']
+        logits_rec = self.vae.decode(outputs,z_list = z_rec)['logits']
+        logits_text = self.vae.decode(outputs,z_list = z_text)['logits']
+    
+        return logits_merged,logits_rec,logits_text,mu,logvar,rec_mu,rec_logvar
+    
+
+
+
+class GenreModel(nn.Module):
+    def __init__():
+        super().__init__()
+    def set_vae(self,vae):
+        self.vae = vae
+    def make_genre_vector(self, input ): 
+        # Initialize the genre vector
+        genre_vector = torch.zeros(input.shape[0], self.num_genres, device=input.device)
+        # Create a genre map tensor for quick look-up
+        genre_map_tensor = torch.tensor([[int(g in self.genre_map[j]) for g in sorted(self.genres_l)] for j in range(input.shape[1])], device=input.device).float()
+        genre_vector += input @ genre_map_tensor
+        #calcualte proportions
+        normalized_genre_vector = genre_vector / genre_vector.sum(dim=1).unsqueeze(1)
+
+        return normalized_genre_vector
+    def generate_recommendations(self,data_tensor,topk,alpha = .5,neg = False,mask_genre = None):
+
+        data_tensor=data_tensor.unsqueeze(0)
+
+        sentence_rep = self.make_genre_vector(data_tensor)
+        if mask_genre is not None:
+
+            mask_index = self.genre_inds[mask_genre]
+            mask = torch.zeros(sentence_rep.size(1), dtype=torch.bool)
+            mask[mask_index] = True
+            sentence_rep[:,~mask] = 0
+            sentence_rep[:,mask] = 1
+
+        sentence_rep = self.mlp(sentence_rep)
+        mu,logvar = sentence_rep[:,:self.args.emb_dim],sentence_rep[:,self.args.emb_dim:]
+        z_text = self.reparameterize(mu, logvar)
+        prior_mu, prior_logvar = self.vae.encode(data_tensor)
+        z_rec = self.vae.reparameterize(prior_mu, prior_logvar)
+        if neg: 
+
+            z_merged =  + (z_rec -z_text)/2
+            
+        else:
+
+            z_merged = (1-alpha)*z_text + alpha*z_rec 
+
+
+        logits = self.vae.decode(z_merged)
+
+        #check shape of data_tensor 
+        
+        #mask the logits of the data_tensor 
+        logits[data_tensor >= 1] = np.log(.000001)
+        
+        #returned ranked items based on topk
+
+        ranked_logts = torch.topk(logits,topk)
+
+
+        return ranked_logts.indices.flatten().tolist() 
+        
+
+
+
+class GenreVae(nn.Module):
+    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
+    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
+    def __init__(self,num_genres,prior,genre_map,genres_l,epsilon,concat=False,num_movies = None):
+        super().__init__()
+        self.epsilon = epsilon
+        self.num_genres = num_genres
+        self.mlp = nn.Sequential(
+            nn.Linear( num_genres,800, bias=False),
+        )
+        self.vae = prior
+        self.genres_l = genres_l
+        self.model_parallel = True
+        self.concat = concat
+        if concat: 
+            self.concat_mlp = nn.Linear(800,self.args.emb_dim,bias = False)
+        self.__init__weights()
+        self.genre_map = genre_map 
+        self.genre_coutns = {g:0 for g in genres_l}
+        self.genre_inds = {g.replace('-',' '):i for i,g in enumerate(sorted(genres_l))}
+        for g in genre_map:
+            for g_ in genre_map[g]:
+                self.genre_coutns[g_] += 1
+        self.genre_count_vector = torch.tensor([self.genre_coutns[g] for g in genres_l]).float()
+        self.genre_columns_one_hot = defaultdict(lambda : torch.zeros(num_movies))
+        
+    def __init__weights(self):
+        for layer in self.mlp:
+            if isinstance(layer, nn.Linear):
+                fan_in = layer.weight.size()[1]
+                fan_out = layer.weight.size()[0]
+                std = np.sqrt(2.0 / (fan_in + fan_out))
+                layer.weight.data.normal_(0.0, std)
+        if self.concat:
+            fan_in = self.concat_mlp.weight.size()[1]
+            fan_out = self.concat_mlp.weight.size()[0]
+            std = np.sqrt(2.0 / (fan_in + fan_out))
+            self.concat_mlp.weight.data.normal_(0.0, std)
+            
+    
+    def forward(
+        self,
+        data_tensor: torch.LongTensor = None,
+        alpha = .5,
+        neg = False,
+        **kwargs
+    ) :
+        sentence_rep = self.make_genre_vector(data_tensor)
+        sentence_rep = self.mlp(sentence_rep)
+        mu,logvar = sentence_rep[:,:self.args.emb_dim],sentence_rep[:,self.args.emb_dim:]
+        z_text = self.vae.reparameterize(mu, logvar)
+        prior_mu, prior_logvar = self.vae.encode(data_tensor)
+        z_rec = self.vae.reparameterize(prior_mu, prior_logvar)
+        if neg: 
+
+            z_merged =  + (z_rec -z_text)/2
+            
+        else:
+
+            z_merged = (1-alpha)*z_text + alpha*z_rec 
+
+
+        logits_merged = self.vae.decode(z_merged)
+        logits_rec = self.vae.decode(z_rec)
+        logits_text = self.vae.decode(z_text)
+        return logits_merged,logits_rec,logits_text,mu,logvar,prior_mu,prior_logvar,z_rec,None
+    
+
+ 
+class GenreTEARS(GenreModel):
+    
+    def __init__(self,num_genres,genre_map,genres_l,epsilon,dropout,args,concat=False,num_movies = None):
+        super().__init__()
+        self.epsilon = epsilon
+        self.num_genres = num_genres
+        self.mlp = nn.Sequential(
+            nn.Linear( num_genres,800, bias=False),
+        )
+        self.genres_l = genres_l
+        self.model_parallel = True
+        self.concat = concat
+        if concat: 
+            self.concat_mlp = nn.Linear(800,self.args.emb_dim,bias = False)
+
+        self.genre_map = genre_map 
+        self.genre_coutns = {g:0 for g in genres_l}
+        #fill in genre counts 
+        self.genre_inds = {g.replace('-',' '):i for i,g in enumerate(sorted(genres_l))}
+        for g in genre_map:
+            for g_ in genre_map[g]:
+                self.genre_coutns[g_] += 1
+        
+        self.genre_count_vector = torch.tensor([self.genre_coutns[g] for g in genres_l]).float()
+        self.genre_columns_one_hot = defaultdict(lambda : torch.zeros(num_movies))
+        self.classifier = MultiVAE(q_dims = [num_genres,800,self.args.emb_dim],p_dims = [self.args.emb_dim,num_movies],dropout = dropout)
+        self.model_parallel = True
+        
+
+    def forward(
+        self,
+        data_tensor = None,
+        **kwargs
+    ) :
+        sentence_rep = self.make_genre_vector(data_tensor)
+        logits,mu,logvar = self.classifier(sentence_rep)
+
+        
+        return logits,mu,logvar
+
+    def generate_recommendations(self,data_tensor,topk,mask_genre = None):
+
+        data_tensor=data_tensor.unsqueeze(0)
+      
+        sentence_rep = self.make_genre_vector(data_tensor)
+        
+        if mask_genre is not None:
+            mask_index = self.genre_inds[mask_genre]
+            mask = torch.zeros(sentence_rep.size(1), dtype=torch.bool)
+            mask[mask_index] = True
+            sentence_rep[:,~mask] = 0
+            sentence_rep[:,mask] = 1
+
+        logits = self.classifier_forward(sentence_rep)[0]
+        #check shape of data_tensor 
+        if len(data_tensor.shape) == 1:
+            data_tensor = data_tensor.unsqueeze(0)
+        
+        #mask the logits of the data_tensor 
+
+        logits[data_tensor >= 1] = np.log(.000001)
+        
+        #returned ranked items based on topk
+
+        ranked_logts = torch.topk(logits,topk)
+
+
+        return ranked_logts.indices.flatten().tolist()
+           
+        
 
 
 
 def get_tokenizer(args):
+    return T5Tokenizer.from_pretrained('google-t5/t5-base')
 
-    if args.embedding_module == 'McGill-NLP/LLM2Vec-Mistral-7B-Instruct-v2-mntp':
-        tokenizer = AutoTokenizer.from_pretrained(args.embedding_module)
-    else:
-        tokenizer = T5Tokenizer.from_pretrained('google-t5/t5-base')
-    return tokenizer
+def get_model(args, num_movies):
 
-def get_model(args, tokenizer, num_movies, rank, world_size):
-    if args.embedding_module == 'google-t5/t5-3b' or args.embedding_module == 'google-t5/t5-large':
-        model,lora_config = get_google_t5_model(args, num_movies,args.embedding_module)
-    elif args.embedding_module == "microsoft/phi-2":
-        model,lora_config = get_microsoft_phi_model(args, num_movies, tokenizer)
-    elif args.embedding_module == "McGill-NLP/LLM2Vec-Mistral-7B-Instruct-v2-mntp":
-        model,lora_config = get_mcgill_model(args, num_movies, tokenizer)
-    elif args.embedding_module == "t5_film":
-        model,lora_config  = get_VAE_model(args,num_movies)
-    elif args.embedding_module =='VAE':
-        if args.DAE:
-            return get_MultiDAE(args,num_movies) 
-            
+    if args.embedding_module =='MVAE':
 
-        model,lora_config = get_MultiVAE(args,num_movies)
-    elif args.embedding_module =='sentenceT5ClassificationPooling':
-        model,lora_config = get_t5_pooling(args,num_movies )
-    elif args.embedding_module =='T5Vae':
-        
-        model,lora_config = get_t5VAE(args,num_movies )
-    elif args.embedding_module == 'VariationalT5':
-        model, lora_config = get_VariationalT5(args,num_movies)
-    elif args.embedding_module == 'OTVae':
-        model,lora_config = get_OT(args,num_movies)
+
+        model = get_MultiVAE(args,num_movies)
+
+    elif args.embedding_module =='TearsMVAE':
+        model = get_TearsVAE(args,num_movies )
+    elif args.embedding_module == 'TearsBase':
+        model = get_TearsBase(args,num_movies)
     elif args.embedding_module == 'RecVAE':
         return get_RecVAE(args,num_movies)
-    elif args.embedding_module == 'OTRecVAE':
+    elif args.embedding_module == 'TearsRecVAE':
         return get_t5RecVAE(args,num_movies)
-    elif args.embedding_module =='FT5RecVAE':
-        return get_OT_RecVAE(args,num_movies)
     elif args.embedding_module == 'MultiDAE':
         return get_MultiDAE(args,num_movies)
     elif args.embedding_module == 'MacridVAE':
         return get_MacridVAE(args,num_movies)
-    elif args.embedding_module =='MacridTEARS':
+    elif args.embedding_module =='TearsMacrid':
         return get_MacridTEARS(args,num_movies)
     elif args.embedding_module == 'RecVAEGenreVAE':
         return get_GenreVAE(args,num_movies)
@@ -2009,14 +1103,119 @@ def get_model(args, tokenizer, num_movies, rank, world_size):
         return get_GenreTEARS(args,num_movies)
     else:
         raise ValueError(f"Unsupported embedding module: {args.embedding_module}")
-    return model,lora_config
+    return model
 
-def get_VariationalT5(args,num_movies):
-    model = sentenceT5Vae.from_pretrained('google-t5/t5-base', num_labels=num_movies, classifier_dropout = args.dropout)
+    
+def get_MultiVAE(args,num_movies):
+    pdims = [args.emb_dim,num_movies]
+    model =  MultiVAE(pdims, dropout = args.dropout)
+    return model
+
+def get_MacridVAE(args,num_movies):
+    args.dfac = args.emb_dim//args.kfac
+    model = MacridVAE(num_movies,args)
+
+    return model
+
+def get_MultiDAE(args,num_movies):
+    pdims = [args.emb_dim,num_movies]
+    model =  MultiDAE(pdims, dropout = args.dropout)
+    return model
+
+def get_EASE(args,num_movies,l2_reg):
+    model = EASE(num_movies,l2_reg)
+    return model
+
+def get_TearsBase(args,num_movies):
+    model = TearsBase.from_pretrained('google-t5/t5-base', num_labels=num_movies, classifier_dropout = args.dropout)
     lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
                             target_modules=['q','v','k'],
                             modules_to_save=['classifier'])
-    return model,lora_config
+    get_peft_model(model, lora_config)
+    return model
+
+
+def get_RecVAE(args,num_movies):
+    pdims = [args.emb_dim,num_movies]
+    model =  RecVAE(pdims, dropout = args.dropout,gamma = args.gamma)
+    return model
+
+
+def get_TearsVAE(args,num_movies):
+    pdims = [args.emb_dim,num_movies]
+    vae =  MultiVAE(pdims, dropout = args.dropout)
+    if args.data_name =='ml-1m':
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_VAE_2024-04-27_21-08-15.csv.pt'
+    elif args.data_name =='netflix':
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_VAE_2024-05-02_14-27-25.csv.pt'
+    elif args.data_name == 'goodbooks':
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_VAE_2024-05-26_17-30-51.csv.pt'
+    state_dict = torch.load(p)
+    vae.load_state_dict(state_dict)
+    model = TearsVAE.from_pretrained('google-t5/t5-base',num_labels=num_movies, epsilon = args.epsilon,args = args)
+    lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
+                            target_modules=['q','v','k'],
+                            modules_to_save=['classification_head','mlp','vae'])
+    model = get_peft_model(model, lora_config)
+    model.set_vae(vae)
+
+    return model 
+
+
+def get_t5RecVAE(args,num_movies): 
+    pdims = [args.emb_dim,num_movies]
+    prior =  RecVAE(pdims, dropout = args.dropout,gamma= args.gamma)
+    if args.data_name == 'netflix':
+
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_RecVAE_2024-05-02_14-54-48.csv.pt'
+    elif args.data_name =='ml-1m':
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_RecVAE_2024-05-02_13-10-49.csv.pt'
+
+    elif args.data_name =='goodbooks':
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_RecVAE_2024-05-24_11-57-20.csv.pt'
+
+        
+    state_dict = torch.load(p)
+    prior.load_state_dict(state_dict)
+
+    lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
+                            target_modules=['q','v','k'],
+                            modules_to_save=['classification_head','mlp','RecVAE','Encoder','CompositePrior','concat_mlp'])
+    model = TearsVAE.from_pretrained('google-t5/t5-base',num_labels=num_movies, 
+                                  args = args,
+                                  epsilon = args.epsilon)
+    model = get_peft_model(model, lora_config)
+    model.set_vae( prior )
+
+    return model 
+
+
+def get_MacridTEARS(args,num_movies): 
+    args.dfac = args.emb_dim//args.kfac
+    
+    vae = MacridVAE(num_movies,args)
+    if args.data_name =='ml-1m':
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_MacridVAE_2024-05-10_15-07-31.csv.pt'
+    elif args.data_name == 'netflix':
+        
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_MacridVAE_2024-05-11_11-36-07.csv.pt'
+    elif args.data_name =='goodbooks':
+        
+        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_MacridVAE_2024-05-27_12-56-52.csv.pt'
+    vae.load_state_dict(torch.load(p))
+    vae.set_item_weights_copy()
+    lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
+                            target_modules=['q','v','k'],
+                            # modules_to_save=['classification_head','prior','mlp'])
+                       
+                            modules_to_save=['classification_head','mlp','RecVAE','Encoder','CompositePrior','concat_mlp'])
+    model = MacridTEARS.from_pretrained('google-t5/t5-base',args = args,num_labels=num_movies, 
+                                  
+                                  epsilon = args.epsilon)
+    
+    model = get_peft_model(model, lora_config)
+    model.set_vae( vae )
+    return model 
 
 def get_GenreTEARS(args,num_movies):
     id_to_genre = map_id_to_genre(args.data_name)
@@ -2030,126 +1229,10 @@ def get_GenreTEARS(args,num_movies):
                        genres_l = list(genre_s),
                        num_movies=num_movies,genre_map = id_to_genre,epsilon = args.epsilon,dropout= args.dropout)
     
-    return model,None
-
-
-def get_VAE_model(args,num_movies):
-    model = sentenceT5ClassificationVAE.from_pretrained('google-t5/t5-3b', num_labels=num_movies, classifier_dropout = args.dropout)
-    lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
-                            target_modules=['q','v','k'],
-                            modules_to_save=['classifier'])
-    
-    return model,lora_config
-def get_t5_pooling(args,num_movies):
-    model = sentenceT5ClassificationPooling.from_pretrained('google-t5/t5-3b', num_labels=num_movies, classifier_dropout = args.dropout)
-    lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
-                            target_modules=['q','v','k'],
-                            modules_to_save=['classification_head','VAE','mlp'])
-
-    return model,lora_config
-    
-def get_MultiVAE(args,num_movies):
-    pdims = [400,num_movies]
-    model =  MultiVAE(pdims, dropout = args.dropout)
-    return model,None
-def get_MacridVAE(args,num_movies):
-    args.dfac = 400//args.kfac
-    print(f"{args.dfac=}")
-    model = MacridVAE(num_movies,args)
-
-    return model,None
-
-def get_MultiDAE(args,num_movies):
-    pdims = [400,num_movies]
-    model =  MultiDAE(pdims, dropout = args.dropout)
-    return model,None
-
-def get_google_t5_model(args, num_movies,model):
-            
-    model = sentenceT5Classification.from_pretrained('google-t5/t5-small', num_labels=num_movies, classifier_dropout = args.dropout)
-    lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
-                            target_modules=['q','v','k'],
-                            modules_to_save=['classification_head'])
-    return model,lora_config
-def get_EASE(args,num_movies,l2_reg):
-    model = EASY(num_movies,l2_reg)
     return model
 
-
-
-
-
-
-def get_t5VAE(args,num_movies):
-    pdims = [400,num_movies]
-    prior =  MultiVAE(pdims, dropout = args.dropout)
-    if args.data_name =='ml-1m':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_VAE_2024-04-27_21-08-15.csv.pt'
-    elif args.data_name =='netflix':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_VAE_2024-05-02_14-27-25.csv.pt'
-    elif args.data_name == 'goodbooks':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_VAE_2024-05-26_17-30-51.csv.pt'
-    state_dict = torch.load(p)
-    prior.load_state_dict(state_dict)
-    model = T5Vae.from_pretrained('google-t5/t5-base',num_labels=num_movies, classifier_dropout = args.dropout,prior = prior,epsilon = args.epsilon)
-
-    lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
-                            target_modules=['q','v','k'],
-                            # modules_to_save=['classification_head','prior','mlp'])
-                            modules_to_save=['classification_head','mlp','vae'])
-    # model.prior.train()
-    #turn off the gradient for the prior.q layers
-
-    return model ,lora_config
-
-def get_RecVAE(args,num_movies):
-    pdims = [400,num_movies]
-
-    
-    model =  RecVAE(pdims, dropout = args.dropout,gamma = args.gamma)
-    # for name,param in model.named_parameters():
-    #     print(f"{name,param.mean()=}")
-    # exit()
-        
-    return model,None
-
-def get_t5RecVAE(args,num_movies): 
-    pdims = [400,num_movies]
-    # print(f"{num_movies=}")
-
-    prior =  RecVAE(pdims, dropout = args.dropout,gamma= args.gamma)
-    if args.data_name == 'netflix':
-        # print('netflix')
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_RecVAE_2024-05-02_14-54-48.csv.pt'
-    elif args.data_name =='ml-1m':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_RecVAE_2024-05-02_13-10-49.csv.pt'
-        # p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_RecVAE_2024-04-27_15-53-38.csv.pt'
-    elif args.data_name =='goodbooks':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_RecVAE_2024-05-24_11-57-20.csv.pt'
-
-        
-    state_dict = torch.load(p)
-    prior.load_state_dict(state_dict)
-    # classifier =  RecVAE(pdims, dropout = args.dropout)
-
-    lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
-                            target_modules=['q','v','k'],
-                            # modules_to_save=['classification_head','prior','mlp'])
-                            modules_to_save=['classification_head','mlp','RecVAE','Encoder','CompositePrior','concat_mlp'])
-    model = T5Vae.from_pretrained('google-t5/t5-base',num_labels=num_movies, 
-                                  classifier_dropout = args.dropout,prior = None,
-                                  epsilon = args.epsilon,concat = args.concat)
-    model = get_peft_model(model, lora_config)
-    model.set_vae( prior )
-    # print(f"{model.vae=}")
-    # model.prior.train()
-    
-
-    return model ,None
-
-
 def get_GenreVAE(args,num_movies): 
-    pdims = [400,num_movies]
+    pdims = [args.emb_dim,num_movies]
     # print(f"{num_movies=}")
 
     prior =  RecVAE(pdims, dropout = args.dropout,gamma= args.gamma)
@@ -2177,94 +1260,9 @@ def get_GenreVAE(args,num_movies):
                                   genres_l = list(genre_s), epsilon = args.epsilon,concat = args.concat,num_movies = num_movies)
     # model = get_peft_model(model, lora_config)
     model.set_vae( prior )
-    # print(f"{model.vae=}")
-    # model.prior.train()
     
 
-    return model ,None
+    return model 
 
 
-def get_MacridTEARS(args,num_movies): 
-    args.dfac = 400//args.kfac
     
-    vae = MacridVAE(num_movies,args)
-    if args.data_name =='ml-1m':
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_MacridVAE_2024-05-10_15-07-31.csv.pt'
-    elif args.data_name == 'netflix':
-        
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_MacridVAE_2024-05-11_11-36-07.csv.pt'
-    elif args.data_name =='goodbooks':
-        
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_MacridVAE_2024-05-27_12-56-52.csv.pt'
-
-        
-
-    vae.load_state_dict(torch.load(p))
-    vae.set_item_weights_copy()
-    lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
-                            target_modules=['q','v','k'],
-                            # modules_to_save=['classification_head','prior','mlp'])
-                       
-                            modules_to_save=['classification_head','mlp','RecVAE','Encoder','CompositePrior','concat_mlp'])
-    model = MacridTEARS.from_pretrained('google-t5/t5-base',args = args,num_labels=num_movies, 
-                                  
-                                  epsilon = args.epsilon)
-    
-    model = get_peft_model(model, lora_config)
-    model.set_vae( vae )
-    return model ,None
-    
-
-def get_OT_RecVAE(args,num_movies):
- 
-    pdims = [400,num_movies]
-
-
-    prior =  RecVAE(pdims, dropout = args.dropout,gamma= args.gamma)
-    if args.data_name == 'netflix':
-
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_netflix_embedding_module_RecVAE_2024-04-27_10-56-43.csv.pt'
-    elif args.data_name =='goodbooks':
-        
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_goodbooks_embedding_module_RecVAE_2024-05-20_11-27-02.csv.pt'
-        
-    else: 
-        
-        p = f'{args.scratch}/saved_model/{args.data_name}/t5_classification_fixed_data_ml-1m_embedding_module_RecVAE_2024-04-27_20-51-00.csv.pt'
-        
-        
-    state_dict = torch.load(p)
-    prior.load_state_dict(state_dict)
-    
-    llm = sentenceT5Vae.from_pretrained('google-t5/t5-base', num_labels=num_movies, classifier_dropout = args.dropout)
-    
-    lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
-                            target_modules=['q','v','k'],
-                            modules_to_save=['classifier'])
-    llm = get_peft_model(llm, lora_config)
-    if args.data_name =='ml-1m':
-        
-        state_dict_llm = torch.load(f'{args.scratch}/saved_model/{args.data_name}/ot_train_vae_ml-1m_embedding_module_VariationalT5_2024-04-28_12-23-19.csv.pt')
-    else:
-        state_dict_llm = torch.load(f'{args.scratch}/saved_model/{args.data_name}/ot_train_vae_ml-1m_embedding_module_VariationalT5_2024-04-28_12-23-19.csv.pt')
-
-    # for key in state_dict_llm.keys():
-    #     if 'classifier' in  key:
-    #         new_key = key.replace('classifier', 'vae')
-    #         state_dict_llm[new_key] = state_dict_llm.pop(key)
-    llm.load_state_dict(state_dict_llm)
-
-    llm.merge_and_unload()
-    lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
-                            target_modules=['q','v','k'],
-                            # modules_to_save=['classification_head','prior','mlp'])
-                            modules_to_save=['classifier'])
-    llm = get_peft_model(llm, lora_config)
-    #turn off the gradient for the prior.q layers
-    model = otVAE.from_pretrained('google-t5/t5-base',num_labels=num_movies, classifier_dropout = args.dropout,vae = prior,epsilon = args.epsilon, llm = llm,prior = prior.prior)
-
-
-
-
-    return model ,None
-

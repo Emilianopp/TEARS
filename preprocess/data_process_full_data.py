@@ -12,7 +12,7 @@ warnings.filterwarnings("ignore")
 
 
 parser = argparse.ArgumentParser(description='Generate train, validation, and test splits for MovieLens dataset.')
-parser.add_argument('--data_name', type=str, choices=['ml-1m', 'ml-100k','books','goodbooks','netflix'], default='ml-100k',
+parser.add_argument('--data_name', type=str, choices=['ml-1m', 'ml-100k','books','goodbooks','netflix'], default='ml-1m',
                         help='Name of the MovieLens dataset (ml-1m or ml-100k). Default is ml-1m.')
 parser.add_argument('--timestamp', action='store_true')
 
@@ -91,7 +91,7 @@ def sample_most_recent(user_movies):
 
 def split_and_filter_ratings(user_movies, rating_threshold=4):
     # Sort the DataFrame by the 'timestamp' column in descending order and select the first 52 movies
-    user_movies = user_movies.sort_values(by='timestamp', ascending=False) if args.timestamp else user_movies
+    user_movies = user_movies.sort_values(by='timestamp', ascending=False) 
     if user_movies.shape[0] < 52:
         #take the last two movies that are rated higher than the threshold
         validation_test_movies = user_movies[user_movies['rating'] >= rating_threshold].tail(2)
@@ -177,26 +177,27 @@ if __name__ == "__main__":
 
 
     if data_name == 'ml-1m':
-        valid_item_names = pd.read_csv(f'../data/ml-1m/movies.dat',encoding='ISO-8859-1',sep='::',header=None).iloc[:,1].tolist()
-        ratings_file = '../data/ml-1m/ratings.dat'
+        k = 10  #ml-1m already has a minimum of 20 interactions
+        
+        valid_item_names = pd.read_csv(f'./data/ml-1m/movies.dat',encoding='ISO-8859-1',sep='::',header=None).iloc[:,1].tolist()
+        ratings_file = './data/ml-1m/ratings.dat'
         separator = "::"
         header = None
         rating_columns = ['userId', 'itemId', 'rating', 'timestamp']
-        movie_metadata_file = '../data/ml-1m/movies.dat'
+        movie_metadata_file = './data/ml-1m/movies.dat'
         ratings = pd.read_csv(ratings_file, sep=separator, header=header, names=rating_columns)
         
         # Load movie metadata
-        movie_metadata = pd.read_csv('../data/merged_asin_movielens_summary.csv')
+        movie_metadata = pd.read_csv(movie_metadata_file,encoding='ISO-8859-1',sep='::',header=None)
+        movie_metadata.columns = ['movielens_id','title','genre']
 
 
-        # print(f"{ratings=}")
         ratings = ratings.merge(movie_metadata, left_on='itemId', right_on='movielens_id', how = 'left')
       
-        # exit()
         train_data, val_data, test_data,promp_set,non_users = generate_train_val_test_splits(ratings, k)
  
     elif data_name == 'books':
-        ratings_file = '../data/books/ratings.csv'
+        ratings_file = './data/books/ratings.csv'
         ratings = pd.read_csv(ratings_file)
         ratings.rename(columns={'book_id':'itemId','review/time':'timestamp','Title':'title','review/score':'rating','User_id':'userId','categories':'genres'}, inplace=True)
 
@@ -204,7 +205,7 @@ if __name__ == "__main__":
         #rename the bookId column to itemId
         train_data, val_data, test_data,promp_set,non_users = generate_train_val_test_splits(ratings, k)
     elif data_name == 'goodbooks':
-        ratings_file = '../data/goodbooks/ratings.csv'
+        ratings_file = './data/goodbooks/ratings.csv'
         ratings = pd.read_csv(ratings_file)
         #remove cold start items
         ratings = ratings[ratings['book_id'].isin(ratings['book_id'].value_counts()[ratings['book_id'].value_counts()>10].index)]
@@ -214,7 +215,8 @@ if __name__ == "__main__":
         #rename the bookId column to itemId
         train_data, val_data, test_data,promp_set,non_users = generate_train_val_test_splits(ratings, k)
     elif data_name == 'netflix':
-        ratings_file = '../data/netflix/ratings.csv'
+        
+        ratings_file = './data/netflix/ratings_filtered.csv'
         ratings = pd.read_csv(ratings_file)
         ratings.rename(columns={'MovieID':'itemId','Title':'title','CustomerID':'userId','Name':'title','Rating':'rating','Date':'timestamp'}, inplace=True)
         print(f"{ratings.columns=}")
@@ -265,11 +267,15 @@ if __name__ == "__main__":
     test_data = test_data[~test_data['userId'].isin(user_set)]
 
     #save data
-    train_data.to_csv(f'../data_preprocessed/{data_name}/train_leave_one_out_.csv', index=False)
-    val_data.to_csv(f'../data_preprocessed/{data_name}/validation_leave_one_out_.csv',index=False)
-    test_data.to_csv(f'../data_preprocessed/{data_name}/test_leave_one_out_.csv', index=False)
-    promp_set.to_csv(f'../data_preprocessed/{data_name}/prompt_set_new_{"timestamped" if args.timestamp else ""}.csv', index=False)
-    strong_generalization_set.to_csv(f'../data_preprocessed/{data_name}/strong_generalization_set_.csv', index=False)
+    '''
+    Since all user summaries exclude two movies from them for validation, we holdout two movies always from the training set 
+    This procedure is the most fair for the summaries
+    '''
+    train_data.to_csv(f'./data_preprocessed/{data_name}/train_leave_one_out_.csv', index=False)
+    val_data.to_csv(f'./data_preprocessed/{data_name}/validation_leave_one_out_.csv',index=False)
+    test_data.to_csv(f'./data_preprocessed/{data_name}/test_leave_one_out_.csv', index=False)
+    promp_set.to_csv(f'./data_preprocessed/{data_name}/prompt_set_new_.csv', index=False)
+    strong_generalization_set.to_csv(f'./data_preprocessed/{data_name}/strong_generalization_set_.csv', index=False)
     movie_set = set(train_data['itemId']) 
     max_movie_id = max(movie_set)
 
