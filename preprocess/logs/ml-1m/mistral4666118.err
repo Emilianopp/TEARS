@@ -1,2 +1,0 @@
-/var/spool/slurmd/job4666118/slurm_script: line 18: syntax error near unexpected token `('
-/var/spool/slurmd/job4666118/slurm_script: line 18: `dropout_index=$sh((SLURM_ARRAY_TASK_ID / 3 % 3))'
