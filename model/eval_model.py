@@ -27,9 +27,10 @@ class LargeScaleEvaluator(nn.Module):
         self.genre_set = ', '.join(self.genre_list)
         self.args = args
 
-        if os.path.exists(f'./results/{self.args.data_name}/gpt4_results_large_genre_{split}.csv'):
+        if os.path.exists(f'./saved_user_summary/{self.args.data_name}/gpt4_results_large_genre_{split}.csv'):
             self.df = pd.read_csv(
-                f'./results/{self.args.data_name}/gpt4_results_large_genre_{split}.csv')
+                f'./saved_user_summary/{self.args.data_name}/gpt4_results_large_genre_{split}.csv')
+
         self.alpha = alpha
         self.alpha2 = None
 
@@ -199,7 +200,7 @@ class LargeScaleEvaluator(nn.Module):
 
         df = pd.DataFrame(data)
         df.to_csv(
-            f'./results/{self.args.data_name}/gpt4_results_large_genre_{split}.csv')
+            f'./saved_user_summary/{self.args.data_name}/gpt4_results_large_genre_{split}.csv')
         print('WROTE DF')
         self.df = df
 

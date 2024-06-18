@@ -6,6 +6,11 @@
 #Gamma is for RecVAE
 #kfac is for MacridVAE
 
+export MASTER_PORT=$(expr 10001)
+export MASTER_ADDR="127.0.0.2"export MASTER_PORT=$(expr 10001 )
+export MASTER_ADDR="127.0.0.2"
+
+
 python -m trainer.train\
  --seed=2024\
  --embedding_module=MacridVAE\

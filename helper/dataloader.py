@@ -1,5 +1,6 @@
 import ast
 import pandas as pd
+import csv
 import pickle
 import numpy as np
 import torch
@@ -123,14 +124,39 @@ def map_id_to_title(data='ml-1m'):
 
         with open('./data_preprocessed/netflix/show2id.pkl', 'rb') as f:
             item_id_map = pickle.load(f)
-        df = pd.read_csv('./data/netflix/netflix_genres.csv')
 
+        with open('./data/netflix/movie_titles.csv', 'r') as csvfile:
+            reader = csv.reader(csvfile)
+            data = []
+            for row in reader:
+                new_row = []
+                comma_count = 0
+                for field in row:
+                    new_row.append(field)
+                    if ',' in field:
+                        comma_count += field.count(',')
+                        if comma_count <= 3:
+                            new_row.append('entry')  # add a new column with the value 'entry'
+                data.append(new_row)
+
+        # Convert the data to a Pandas DataFrame
+        df = pd.DataFrame(data)
+        df.columns = ['movieId', 'year', 'title1','title2','title3','title4']
+
+        def apply_fun(x):
+            cols= ['title1','title2','title3','title4']
+            out = ''
+            for col in cols:
+                if x[col] is not None:
+                    out += x[col] + ' '
+            return out
+        df['title'] = df.apply(apply_fun, axis=1)
         mapping = {}
-
         for index, row in df.iterrows():
+
             if row['movieId'] in item_id_map:
                 mapping[item_id_map[row['movieId']]] = row['title']
-
+                
     elif data == 'goodbooks':
         df = pd.read_csv('./data/goodbooks/genres.csv')
         df.genres = df.genres.apply(ast.literal_eval)
@@ -158,6 +184,7 @@ def map_id_to_genre(data='ml-1m'):
                 mapping[item_id_map[row['itemId']]] = genres
 
     elif data == 'netflix':
+        
 
         with open('./data_preprocessed/netflix/show2id.pkl', 'rb') as f:
             item_id_map = pickle.load(f)
