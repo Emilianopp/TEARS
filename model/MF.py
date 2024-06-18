@@ -1130,7 +1130,7 @@ def get_TearsVAE(args,num_movies):
     pdims = [args.emb_dim,num_movies]
     vae =  MultiVAE(pdims, dropout = args.dropout)
     state_dict = torch.load(p)
-    p = f'{args.scratch}/saved_model/{args.data_name}/{args.vae_path}'
+    p = f'{args.scratch}/saved_model/{args.data_name}/{args.vae_path}.pt'
     vae.load_state_dict(state_dict)
     model = TearsVAE.from_pretrained('google-t5/t5-base',num_labels=num_movies, epsilon = args.epsilon,args = args)
     lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
@@ -1145,7 +1145,7 @@ def get_TearsVAE(args,num_movies):
 def get_t5RecVAE(args,num_movies): 
     pdims = [args.emb_dim,num_movies]
     prior =  RecVAE(pdims, dropout = args.dropout,gamma= args.gamma)
-    p = f'{args.scratch}/saved_model/{args.data_name}/{args.vae_path}'
+    p = f'{args.scratch}/saved_model/{args.data_name}/{args.vae_path}.pt'
     state_dict = torch.load(p)
     prior.load_state_dict(state_dict)
     lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
@@ -1163,7 +1163,7 @@ def get_t5RecVAE(args,num_movies):
 def get_MacridTEARS(args,num_movies): 
     args.dfac = args.emb_dim//args.kfac
     vae = MacridVAE(num_movies,args)
-    p = f'{args.scratch}/saved_model/{args.data_name}/{args.vae_path}'
+    p = f'{args.scratch}/saved_model/{args.data_name}/{args.vae_path}.pt'
     vae.load_state_dict(torch.load(p))
     vae.set_item_weights_copy()
     lora_config = LoraConfig(task_type=TaskType.SEQ_CLS, r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.dropout,
@@ -1192,7 +1192,7 @@ def get_GenreTEARS(args,num_movies):
 def get_GenreVAE(args,num_movies): 
     pdims = [args.emb_dim,num_movies]
     prior =  RecVAE(pdims, dropout = args.dropout,gamma= args.gamma)
-    p = f'{args.scratch}/saved_model/{args.data_name}/{args.vae_path}'
+    p = f'{args.scratch}/saved_model/{args.data_name}/{args.vae_path}.pt'
     state_dict = torch.load(p)
     prior.load_state_dict(state_dict)
     id_to_genre = map_id_to_genre(args.data_name)

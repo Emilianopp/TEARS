@@ -293,7 +293,6 @@ def parse_args(notebook=False):  # Parse command line arguments
     parser = argparse.ArgumentParser(description="TEARS")
     parser.add_argument("--data_name", default='ml-1m', type=str)
     parser.add_argument("--vae_path", type=str)
-    parser.add_argument("--model_name", default='Transformer', type=str)
     parser.add_argument("--embedding_module",default="MVAE", type=str)
     parser.add_argument("--scheduler", default='None', type=str)
     parser.add_argument("--bs", default=64, type=int)
