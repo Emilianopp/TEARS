@@ -24,7 +24,7 @@ python -m preprocess.subset_netflix
 
 ### Goodbooks
 
-Download the original datset from:
+Download the original dataset from:
 
 [https://www.kaggle.com/datasets/zygmunt/goodbooks-10k](https://www.kaggle.com/datasets/zygmunt/goodbooks-10k)
 
@@ -34,7 +34,7 @@ Get the genre information from (done automatically in code):
 [https://github.com/malcolmosh/goodbooks-10k-extended/blob/master/README.md](https://github.com/malcolmosh/goodbooks-10k-extended/blob/master/README.md)
 
 
-## Data pipeline
+## Data Pipeline
 
 To reproduce the dataset subset simply run 
 
@@ -54,4 +54,12 @@ To remake the summaries simply run
 
 ```bash
 python -m preprocess.make_in_context_data --data_name=${datset_name}
+```
+
+## Controllability
+
+$\Delta_{\text{up/down}}$ is evaluated on the main training script. For this to work the augmented summaries have to be built. These can be built with the following command:
+
+```bash
+python -m preprocess.prompt_gpt --data_name=${datset_name}
 ```
