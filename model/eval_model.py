@@ -135,8 +135,8 @@ class LargeScaleEvaluator(nn.Module):
             ]
 
             genres = openai.ChatCompletion.create(
-                model='gpt-4o',
-                # model='gpt-4o',
+                model='gpt-4-1106-preview',
+
                 messages=msg,
                 max_tokens=300,
                 temperature=0.001,
@@ -177,7 +177,6 @@ class LargeScaleEvaluator(nn.Module):
 
             gpt_output = openai.ChatCompletion.create(
                 model='gpt-4-1106-preview',
-                # model='gpt-4o',
                 messages=msg,
                 max_tokens=300,
                 temperature=0.001,
