@@ -1,0 +1,20 @@
+*.out
+*.sh
+
+data/
+data_preprocessed/
+cc/
+.env
+wandb/
+*.pyc
+saved_LLM/*
+saved_model/ml-100k/*
+# Ignore all files and folders
+
+notebooks/*
+# Except .py files
+!*.py
+
+*.pth
+*.csv 
+*json
