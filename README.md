@@ -24,6 +24,15 @@ tar xvzf data_preprocessed.tar.gz
 tar xvzf saved_user_summary.tar.gz
 ```
 
+`tar xvzf data.tar.gz` contains all original data, which can be redownloaded using the instructions provided in [data](data/README.md), but we include here for convinience. 
+
+`tar xvzf data_preprocessed.tar.gz` contains all relevant processed data that is needed to run the code.
+
+
+`saved_user_summary.tar.gz` contains all LLaMA and GPT user summaries, as well as augmented summaries used to evaluate large-scope and fine-grained controllability. 
+
+
+
 ## Execution 
 We provide an example execution command below, but note other examples given in `/execute`
 
@@ -47,6 +56,8 @@ python -m trainer.train \
     --eval_control \
     --wandb
 ```
+
+## Requirements
 
 ## Acknowledgements
 
