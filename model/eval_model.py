@@ -677,21 +677,6 @@ class FineGrainedEvaluator():
             dfs_err.to_csv(f"./saved_user_summary/{self.args.data_name}/results_small_{self.split}_{self.args.llm_backbone}_err.csv")
     
 
-def edit_state_dict(state_dict):
-    
-    new_state_dict = {}
-    for key, value in state_dict.items():
-        if "original_module" in key and "base_model.model.mlp" not in key:
-            new_key = key.replace("original_module.", "")
-        elif "modules_to_save.default" in key and "base_model.model.mlp" not in key:
-            new_key = key.replace("modules_to_save.default.", "")
-        else:
-            new_key = key
-        new_state_dict[new_key] = value
-
-    
-    return new_state_dict
-
 
 
 def parse_args(notebook=False):  # Parse command line arguments
@@ -776,19 +761,15 @@ def parse_args(notebook=False):  # Parse command line arguments
 
 def load_all_models(paths,vae_paths,rank):
     models = {}
-
-
     for module,path in paths.items():
         if path == '': continue
         if module != 'TearsBase':
             args.vae_path = vae_paths[module]
-        else: continue
         p =  path +'.pt'
         args.embedding_module = module
         model = get_model(args,num_movies)
         model.to(rank)
         state_dict = torch.load(p, map_location=torch.device('cuda'))
-        state_dict = edit_state_dict(state_dict)
         model.load_state_dict(state_dict)
         model.eval()
         models[module] = model

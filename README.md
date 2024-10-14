@@ -3,7 +3,7 @@
 Text Representations for Scrutable Recommendations (link to come)
 
 
-![Description](./figures/tears_fig.svg)
+![Description](./figures/tears.svg)
 
 
 ## Data 
