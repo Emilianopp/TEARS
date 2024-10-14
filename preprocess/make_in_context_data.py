@@ -19,9 +19,10 @@ import debugpy
 
 # Load environment variables from the .env file into the script's environment
 load_dotenv()
-key = os.getenv("OPEN-AI-SECRET")
+
 parser = ArgumentParser(description="Your script description here")
-parser.add_argument("--gpt_version", default="gpt-4-1106-preview", help="GPT model version")
+parser.add_argument("--model", default="gpt-4-1106-preview", help="GPT model version")
+
 parser.add_argument("--max_tokens", type=int, default=300, help="Maximum number of tokens for the response")
 parser.add_argument("--debug", action='store_true', help="Whether to run in debug mode")
 parser.add_argument("--data_name", default = 'ml-1m', help="Name of the dataset to use")
@@ -30,7 +31,13 @@ parser.add_argument("--books", action='store_true', help="Whether to run in book
 
 args = parser.parse_args()
 train_data = f'./data_preprocessed/{args.data_name}/prompt_set_timestamped.csv'
-openai.api_key = key
+key = os.getenv("OPEN-AI-SECRET") if 'gpt' in args.model else os.getenv("LLAMA-KEY")
+    
+openai.api_key = key 
+if 'gpt' not in  args.model : 
+ openai.api_base = "https://api.llama-api.com" 
+
+
 
 
 
@@ -60,7 +67,8 @@ def generate_prompts_recent(train_data,num_movies = 30):
 
         
         ratings = user['rating'].tolist()
-        genres = user['genres'].tolist()
+        genres = user['genres'].tolist() if args.data_name == 'netflix' else user['genre'].tolist()
+
 
         prompt = ""
 
@@ -71,7 +79,16 @@ def generate_prompts_recent(train_data,num_movies = 30):
                 
             prompt += f'\nRating: {rating}\n'
             prompt += f'\Genres: {genres}\n'
-        prompts[id] = prompt    
+        prompts[id] = prompt  
+        if 'gpt' not in args.model: 
+            prompt += 'Do not comment on the ratings or specific titles but use qualitative speech such as the user likes, or the user does not enjoy\n'
+            prompt += 'Do not comment mention any actor/director names\n'
+
+        else: 
+            prompt += 'Never make statments like such as  "Films like" or the "user has high ratings for"\n'
+            prompt += 'Make no comments on the not the ratings or specific titles but use qualitative speech such as the user likes, or the user does not enjoy\n'
+            prompt += 'Do not comment mention any actor/director names or any movie names in the summary.\n'
+  
     return prompts
 
 
@@ -137,46 +154,55 @@ if __name__ == "__main__":
 
     prompts = generate_prompts_recent(data, 50) if not args.books else generate_prompts_recent_books(data, 50)
         
-    existing_data = load_existing_data(f'./saved_user_summary/{args.data_name}{args.save_path}/user_summary_gpt4_{"debug" if args.debug else ""}.json')
+    existing_data = load_existing_data(f'./saved_user_summary/{args.data_name}{args.save_path}/user_summary_{args.model.replace("/","_")}_{"debug" if args.debug else ""}.json')
+
     #make existing data keys back into ints 
     existing_data = {float(k):v for k,v in existing_data.items()}
 
     prompts_to_process = {idx: user_prompt for idx, user_prompt in prompts.items() if float(idx) not in existing_data}
    
     return_dict = existing_data
-
     for i, (idx, user_prompt) in (pbar := tqdm(enumerate(prompts_to_process.items()))):
-        msg = [
-            {
-                "role": "system",
-                "content": prompt
-            },
-            {
-                "role": "user",
-                "content": user_prompt
-            }
-        ]
 
-        while True:
-            try:
-                return_dict[float(idx)] = openai.ChatCompletion.create(
-                    model=args.gpt_version,
-                    messages=msg,
-                    max_tokens=args.max_tokens
-                )['choices'][0]['message']['content']
+        if 'gpt' in args.model or 'llama' in args.model:
+            msg = [
+                {
+                    "role": "system",
+                    "content": prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ]
+            
 
-                # If the request is successful, break out of the loop
-                break
-            except Exception as e:
-                pbar.set_description(f"An error occurred: {e} ,Retrying in 30 seconds...")
-                time.sleep(60*3)
+            while True:
+                try:
 
-        if args.debug and i == 5:
-            break
+                    return_dict[float(idx)] = openai.ChatCompletion.create(
+                        model=args.model,
+                        messages=msg,
+                        max_tokens=args.max_tokens,
+                        seed = 0,
+                        temperature = 0 if 'gpt' in args.model else 0,
+                    )['choices'][0]['message']['content']
+                    
+
+
+                    # If the request is successful, break out of the loop
+                    break
+                except Exception as e:
+                    pbar.set_description(f"An error occurred: {e} ,Retrying in 30 seconds...")
+                    time.sleep(60*3)
+
+            if args.debug and i == 5:
+                break                        
+
 
         # Save updated dict as a JSON file
         pbar.set_description(f"Saving user {idx} summary...")
-        with open(f'./saved_user_summary/{args.data_name}{args.save_path}/user_summary_gpt4_{"debug" if args.debug else ""}.json', 'w') as fp:
+        os.makedirs(f'./saved_user_summary/{args.data_name}{args.save_path}', exist_ok=True)
+        with open(f'./saved_user_summary/{args.data_name}{args.save_path}/user_summary_{args.model.replace("/","_")}_{"debug" if args.debug else ""}.json', 'w+') as fp:
 
             json.dump(return_dict, fp, indent=4)
-
