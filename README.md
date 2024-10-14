@@ -21,6 +21,7 @@ To simply use the preprocessed data directly first run:
 
 ```bash
 tar xvzf data_preprocessed.tar.gz
+tar xvzf saved_user_summary.tar.gz
 ```
 
 ## Execution 
