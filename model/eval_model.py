@@ -340,7 +340,10 @@ class LargeScaleEvaluator:
 
                 for j in uids:
                     # Create genre-specific summaries
-                    rep_s1 = f'Summary: {genre} {item} are the users favourite they really enjoy {genre} content '
+                    if neg: 
+                        rep_s1 = f'Summary: Less {genre} {item}'
+                    else:
+                        rep_s1 = f'Summary: More {genre} {item}'
                     #doesnt matter what this is
                     rep_s2 = f''
 
