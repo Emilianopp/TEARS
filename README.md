@@ -1,6 +1,7 @@
 # TEARS
 
-Text Representations for Scrutable Recommendations (link to come)
+Text Representations for Scrutable Recommendations Accepted @ WebConf20225 [(arXiv)](https://arxiv.org/abs/2410.19302)
+
 
 
 ![Description](./figures/tears.svg)
